@@ -483,6 +483,34 @@ export async function checkImageContent(
   }
 }
 
+/**
+ * 确认AIGC安全合规（仅国内站）
+ * 调用 update_settings 接口设置 aigc_compliance_confirmed，避免人脸检测弹窗导致4010错误
+ *
+ * @param refreshToken 刷新令牌
+ * @param regionInfo 区域信息
+ */
+export async function confirmAigcCompliance(
+  refreshToken: string,
+  regionInfo: RegionInfo
+): Promise<void> {
+  // 仅国内站需要确认
+  if (regionInfo.isInternational) return;
+
+  try {
+    logger.info('发送AIGC安全合规确认...');
+    await request("post", "/mweb/v1/update_settings", refreshToken, {
+      data: {
+        custom_settings: { aigc_compliance_confirmed: true },
+      },
+    });
+    logger.info('AIGC安全合规确认成功');
+  } catch (error: any) {
+    // 确认失败不阻塞生成流程，仅记录警告
+    logger.warn(`AIGC安全合规确认失败(不阻塞): ${error.message}`);
+  }
+}
+
  /**
   * 预检查文件URL有效性
   *

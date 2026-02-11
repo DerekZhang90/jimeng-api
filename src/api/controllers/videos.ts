@@ -6,10 +6,10 @@ import APIException from "@/lib/exceptions/APIException.ts";
 
 import EX from "@/api/consts/exceptions.ts";
 import util from "@/lib/util.ts";
-import { getCredit, receiveCredit, request, parseRegionFromToken, getAssistantId, checkImageContent, RegionInfo } from "./core.ts";
+import { getCredit, receiveCredit, request, parseRegionFromToken, getAssistantId, checkImageContent, confirmAigcCompliance, RegionInfo } from "./core.ts";
 import logger from "@/lib/logger.ts";
 import { SmartPoller, PollingStatus } from "@/lib/smart-poller.ts";
-import { DEFAULT_ASSISTANT_ID_CN, DEFAULT_ASSISTANT_ID_US, DEFAULT_ASSISTANT_ID_HK, DEFAULT_ASSISTANT_ID_JP, DEFAULT_ASSISTANT_ID_SG, DEFAULT_VIDEO_MODEL, DRAFT_VERSION, DRAFT_VERSION_OMNI, OMNI_BENEFIT_TYPE, VIDEO_MODEL_MAP, VIDEO_MODEL_MAP_US, VIDEO_MODEL_MAP_ASIA } from "@/api/consts/common.ts";
+import { DEFAULT_ASSISTANT_ID_CN, DEFAULT_ASSISTANT_ID_US, DEFAULT_ASSISTANT_ID_HK, DEFAULT_ASSISTANT_ID_JP, DEFAULT_ASSISTANT_ID_SG, DEFAULT_VIDEO_MODEL, DRAFT_VERSION, DRAFT_VERSION_OMNI, VIDEO_MODEL_MAP, VIDEO_MODEL_MAP_US, VIDEO_MODEL_MAP_ASIA } from "@/api/consts/common.ts";
 import { uploadImageBuffer } from "@/lib/image-uploader.ts";
 import { uploadVideoBuffer, VideoUploadResult } from "@/lib/video-uploader.ts";
 import { extractVideoUrl, fetchHighQualityVideoUrl } from "@/lib/image-utils.ts";
@@ -487,13 +487,13 @@ export async function generateVideo(
         extend: {
           root_model: model,
           m_video_commerce_info: {
-            benefit_type: OMNI_BENEFIT_TYPE,
+            benefit_type: getVideoBenefitType(model),
             resource_id: "generate_video",
             resource_id_type: "str",
             resource_sub_type: "aigc",
           },
           m_video_commerce_info_list: [{
-            benefit_type: OMNI_BENEFIT_TYPE,
+            benefit_type: getVideoBenefitType(model),
             resource_id: "generate_video",
             resource_id_type: "str",
             resource_sub_type: "aigc",
@@ -761,6 +761,9 @@ export async function generateVideo(
       },
     };
   }
+
+  // 发送AIGC安全合规确认（避免人脸检测4010错误）
+  await confirmAigcCompliance(refreshToken, regionInfo);
 
   // 发送请求
   const { aigc_data } = await request(
