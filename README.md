@@ -19,6 +19,9 @@
 - 📊 **Detailed Logs**: Structured logging for easy debugging.
 - 🐳 **Docker Support**: Containerized deployment, ready to use out of the box.
 - ⚙️ **Log Level Control**: Dynamically adjust log output level through configuration files.
+- 🔀 **Async Task Mode**: Submit generation tasks asynchronously, query results by task ID, with Webhook callback support
+- 📡 **Redis Persistence**: Task state supports Redis persistence; automatically falls back to in-memory mode without Redis
+- 🚦 **Concurrency Control**: Async task queue with max 50 concurrent tasks (configurable), excess tasks are queued
 
 ## ⚠ Risk Warning
 
@@ -164,6 +167,16 @@ requestLog: true
 debug: false
 log_level: info # Log levels: error, warning, info (default), debug
 ```
+
+#### Environment Variables (Async Tasks)
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDIS_URL` | empty (falls back to memory) | Redis connection URL, e.g. `redis://localhost:6379` |
+| `TASK_MAX_CONCURRENT` | `50` | Max concurrent async tasks |
+| `TASK_EXPIRE_HOURS` | `1` | Completed task expiry time (hours) |
+
+> **Note**: Async mode works without `REDIS_URL` — it automatically falls back to in-memory storage (task records are lost on restart).
 
 ## 🤖 Claude Code Skill
 
@@ -542,6 +555,127 @@ curl -X POST http://localhost:5100/v1/videos/generations \
   -F "video_file=https://example.com/reference-video.mp4"
 
 ```
+
+### Async Task Mode (New)
+
+All generation endpoints (text-to-image, image-to-image, video generation) support async mode. Add `"async": true` to the request body to enable it — the server returns a `task_id` immediately and runs the generation task in the background.
+
+**Common Async Parameters** (applicable to all generation endpoints):
+- `async` (boolean, optional): Enable async mode, defaults to `false`
+- `callback_url` (string, optional): Webhook callback URL. The server will POST the result to this URL when the task completes or fails (retries 3 times with 5s/15s/30s backoff)
+
+**Async Submit Response**:
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "status": "pending"
+}
+```
+
+**Usage Examples**:
+
+```bash
+# Async image generation
+curl -X POST http://localhost:5100/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_SESSION_ID" \
+  -d '{"model": "jimeng-4.5", "prompt": "A cute kitten", "async": true, "callback_url": "https://your-server.com/webhook"}'
+
+# Async video generation
+curl -X POST http://localhost:5100/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_SESSION_ID" \
+  -d '{"model": "jimeng-video-3.5-pro", "prompt": "A cat dancing", "ratio": "16:9", "async": true}'
+```
+
+### Task Management
+
+#### Query a Single Task
+
+**GET** `/v1/tasks/:taskId`
+
+```bash
+curl http://localhost:5100/v1/tasks/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+**In-Progress Response**:
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "type": "video",
+  "status": "processing",
+  "progress": "generating",
+  "model": "jimeng-video-3.5-pro",
+  "prompt": "A cat dancing",
+  "created_at": 1700000000,
+  "updated_at": 1700000050,
+  "queue_stats": { "running": 5, "queued": 2, "maxConcurrent": 50 }
+}
+```
+
+**Completed Response** (`result` field format is identical to the synchronous response):
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "type": "video",
+  "status": "completed",
+  "model": "jimeng-video-3.5-pro",
+  "prompt": "A cat dancing",
+  "created_at": 1700000000,
+  "updated_at": 1700000120,
+  "completed_at": 1700000120,
+  "result": {
+    "created": 1700000120,
+    "data": [{ "url": "https://...", "revised_prompt": "A cat dancing" }]
+  },
+  "queue_stats": { "running": 3, "queued": 0, "maxConcurrent": 50 }
+}
+```
+
+**Failed Response**:
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "type": "video",
+  "status": "failed",
+  "error": "Insufficient credits...",
+  "created_at": 1700000000,
+  "completed_at": 1700000005
+}
+```
+
+#### List All Tasks
+
+**GET** `/v1/tasks`
+
+Supports query parameter filtering:
+- `status` (string, optional): Filter by status — `pending`, `queued`, `processing`, `completed`, `failed`, `cancelled`
+- `type` (string, optional): Filter by type — `image`, `video`, `composition`
+- `limit` (number, optional): Limit number of results, default 100
+
+```bash
+# View all processing tasks
+curl "http://localhost:5100/v1/tasks?status=processing"
+
+# View all video tasks
+curl "http://localhost:5100/v1/tasks?type=video&limit=10"
+```
+
+#### Cancel a Task
+
+**POST** `/v1/tasks/:taskId/cancel`
+
+Only tasks in `pending` or `queued` status can be cancelled.
+
+```bash
+curl -X POST http://localhost:5100/v1/tasks/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/cancel
+```
+
+#### Webhook Callback Format
+
+When a task completes or fails, the system automatically POSTs to the `callback_url`. The request body format is identical to the `GET /v1/tasks/:taskId` response, with the following custom headers:
+- `X-Webhook-Event`: `task.completed` or `task.failed`
+- `X-Task-Id`: The task ID
 
 ### Token API
 

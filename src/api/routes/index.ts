@@ -4,6 +4,7 @@ import ping from "./ping.ts";
 import token from './token.js';
 import models from './models.ts';
 import videos from './videos.ts';
+import tasks from './tasks.ts';
 
 export default [
     {
@@ -19,6 +20,7 @@ export default [
                         images: '/v1/images/generations',
                         compositions: '/v1/images/compositions',
                         videos: '/v1/videos/generations',
+                        tasks: '/v1/tasks',
                         models: '/v1/models',
                         health: '/ping'
                     }
@@ -30,5 +32,6 @@ export default [
     ping,
     token,
     models,
-    videos
+    videos,
+    tasks
 ];

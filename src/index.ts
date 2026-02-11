@@ -6,6 +6,7 @@ import "@/lib/initialize.ts";
 import server from "@/lib/server.ts";
 import routes from "@/api/routes/index.ts";
 import logger from "@/lib/logger.ts";
+import taskStore from "@/lib/task-store.ts";
 
 const startupTime = performance.now();
 
@@ -17,6 +18,9 @@ const startupTime = performance.now();
   logger.info("Process id:", process.pid);
   logger.info("Environment:", environment.env);
   logger.info("Service name:", config.service.name);
+
+  // 初始化任务存储（Redis / 内存降级）
+  await taskStore.init();
 
   server.attachRoutes(routes);
   await server.listen();

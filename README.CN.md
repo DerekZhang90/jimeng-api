@@ -17,6 +17,9 @@
 - 📊 **详细日志**: 结构化日志记录，便于调试
 - 🐳 **Docker支持**: 容器化部署，开箱即用
 - ⚙️ **日志级别控制**: 可通过配置文件动态调整日志输出级别
+- 🔀 **异步任务模式**: 支持异步提交生成任务，通过任务ID查询结果，支持 Webhook 回调通知
+- 📡 **Redis 持久化**: 任务状态支持 Redis 持久化存储，无 Redis 时自动降级为内存模式
+- 🚦 **并发控制**: 异步任务队列，默认最大 50 并发，超出自动排队
 
 ## ⚠ 风险警告
 
@@ -166,6 +169,16 @@ requestLog: true
 debug: false
 log_level: info # 日志级别: error, warning, info(默认), debug
 ```
+
+#### 环境变量配置（异步任务相关）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `REDIS_URL` | 空（降级内存模式） | Redis 连接地址，如 `redis://localhost:6379` |
+| `TASK_MAX_CONCURRENT` | `50` | 最大并发异步任务数 |
+| `TASK_EXPIRE_HOURS` | `1` | 已完成任务自动过期时间（小时） |
+
+> **注意**: 不配置 `REDIS_URL` 也可正常使用异步模式，会自动降级为内存模式（服务重启后任务记录丢失）。
 
 ## 🤖 Claude Code Skill
 
@@ -568,11 +581,140 @@ curl -X POST http://localhost:5100/v1/videos/generations \
 
 ```
 
+### 异步任务模式 (新)
+
+所有生成接口（文生图、图生图、视频生成）均支持异步模式。在请求体中添加 `"async": true` 即可启用，服务端会立即返回 `task_id`，生成任务在后台执行。
+
+**通用异步参数**（适用于所有生成接口）：
+- `async` (boolean, 可选): 是否启用异步模式，默认为 `false`
+- `callback_url` (string, 可选): Webhook 回调地址。任务完成或失败时，服务端会主动 POST 结果到该 URL（重试3次，间隔 5s/15s/30s）
+
+**异步提交响应**：
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "status": "pending"
+}
+```
+
+**使用示例**：
+
+```bash
+# 异步生成图片
+curl -X POST http://localhost:5100/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_SESSION_ID" \
+  -d '{
+    "model": "jimeng-4.5",
+    "prompt": "一只可爱的小猫咪",
+    "async": true,
+    "callback_url": "https://your-server.com/webhook"
+  }'
+
+# 异步生成视频
+curl -X POST http://localhost:5100/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_SESSION_ID" \
+  -d '{
+    "model": "jimeng-video-3.5-pro",
+    "prompt": "一只猫在跳舞",
+    "ratio": "16:9",
+    "async": true
+  }'
+```
+
+### 任务管理
+
+#### 查询单个任务
+
+**GET** `/v1/tasks/:taskId`
+
+```bash
+curl http://localhost:5100/v1/tasks/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+**进行中响应**：
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "type": "video",
+  "status": "processing",
+  "progress": "生成中",
+  "model": "jimeng-video-3.5-pro",
+  "prompt": "一只猫在跳舞",
+  "created_at": 1700000000,
+  "updated_at": 1700000050,
+  "queue_stats": { "running": 5, "queued": 2, "maxConcurrent": 50 }
+}
+```
+
+**已完成响应**（`result` 字段格式与同步模式返回一致）：
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "type": "video",
+  "status": "completed",
+  "model": "jimeng-video-3.5-pro",
+  "prompt": "一只猫在跳舞",
+  "created_at": 1700000000,
+  "updated_at": 1700000120,
+  "completed_at": 1700000120,
+  "result": {
+    "created": 1700000120,
+    "data": [{ "url": "https://...", "revised_prompt": "一只猫在跳舞" }]
+  },
+  "queue_stats": { "running": 3, "queued": 0, "maxConcurrent": 50 }
+}
+```
+
+**失败响应**：
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "type": "video",
+  "status": "failed",
+  "error": "积分不足且无法自动收取。请访问即梦官网手动收取首次积分，或检查账户状态。",
+  "created_at": 1700000000,
+  "completed_at": 1700000005
+}
+```
+
+#### 列出所有任务
+
+**GET** `/v1/tasks`
+
+支持查询参数过滤：
+- `status` (string, 可选): 按状态过滤，支持 `pending`、`queued`、`processing`、`completed`、`failed`、`cancelled`
+- `type` (string, 可选): 按类型过滤，支持 `image`、`video`、`composition`
+- `limit` (number, 可选): 返回数量限制，默认 100
+
+```bash
+# 查看所有进行中的任务
+curl "http://localhost:5100/v1/tasks?status=processing"
+
+# 查看所有视频任务
+curl "http://localhost:5100/v1/tasks?type=video&limit=10"
+```
+
+#### 取消任务
+
+**POST** `/v1/tasks/:taskId/cancel`
+
+仅可取消 `pending` 或 `queued` 状态的任务。
+
+```bash
+curl -X POST http://localhost:5100/v1/tasks/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/cancel
+```
+
+#### Webhook 回调格式
+
+任务完成或失败后，系统会自动 POST 到 `callback_url`，请求体格式与 `GET /v1/tasks/:taskId` 响应一致，并包含以下自定义请求头：
+- `X-Webhook-Event`: `task.completed` 或 `task.failed`
+- `X-Task-Id`: 任务ID
+
 ### Token API
 
 #### Token 绑定代理功能 (新)
-
-**功能说明**：用户可以在 token 中嵌入代理 URL，解决因 IP 限制导致签到获取 0 积分的问题。每个账号可以绑定独立的代理。
 
 **Token 格式**：
 ```

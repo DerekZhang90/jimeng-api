@@ -5,6 +5,10 @@ import Response from '@/lib/response/Response.ts';
 import { tokenSplit } from '@/api/controllers/core.ts';
 import { generateVideo, DEFAULT_MODEL } from '@/api/controllers/videos.ts';
 import util from '@/lib/util.ts';
+import taskStore from '@/lib/task-store.ts';
+import taskQueue from '@/lib/task-queue.ts';
+import { sendWebhook } from '@/lib/webhook.ts';
+import logger from '@/lib/logger.ts';
 
 export default {
 
@@ -39,6 +43,8 @@ export default {
                 .validate('body.filePaths', v => _.isUndefined(v) || (_.isArray(v) && v.length <= 2))
                 .validate('body.functionMode', v => _.isUndefined(v) || (_.isString(v) && ['first_last_frames', 'omni_reference'].includes(v)))
                 .validate('body.response_format', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.async', v => _.isUndefined(v) || _.isBoolean(v) || v === 'true' || v === 'false')
+                .validate('body.callback_url', v => _.isUndefined(v) || (_.isString(v) && v.startsWith('http')))
                 .validate('headers.authorization', _.isString);
 
             const functionMode = request.body.functionMode || 'first_last_frames';
@@ -92,7 +98,78 @@ export default {
             // 兼容两种参数名格式：file_paths 和 filePaths
             const finalFilePaths = filePaths.length > 0 ? filePaths : file_paths;
 
-            // 生成视频
+            // 处理 multipart 中的 async 参数（字符串转布尔）
+            const isAsync = isMultiPart && typeof request.body.async === 'string'
+                ? request.body.async === 'true'
+                : request.body.async === true;
+
+            // ====== 异步模式 ======
+            if (isAsync) {
+                const task = await taskStore.create({
+                    type: "video",
+                    status: "pending",
+                    callback_url: request.body.callback_url,
+                    model,
+                    prompt,
+                });
+
+                taskQueue.enqueue(task.id, async () => {
+                    try {
+                        await taskStore.update(task.id, { status: "processing", progress: "生成中" });
+                        const generatedVideoUrl = await generateVideo(
+                            model,
+                            prompt,
+                            {
+                                ratio,
+                                resolution,
+                                duration: finalDuration,
+                                filePaths: finalFilePaths,
+                                files: request.files,
+                                imageUrls,
+                                videoUrl,
+                                functionMode,
+                            },
+                            token
+                        );
+
+                        let resultData: any;
+                        if (response_format === "b64_json") {
+                            const videoBase64 = await util.fetchFileBASE64(generatedVideoUrl);
+                            resultData = {
+                                created: util.unixTimestamp(),
+                                data: [{ b64_json: videoBase64, revised_prompt: prompt }]
+                            };
+                        } else {
+                            resultData = {
+                                created: util.unixTimestamp(),
+                                data: [{ url: generatedVideoUrl, revised_prompt: prompt }]
+                            };
+                        }
+
+                        await taskStore.update(task.id, {
+                            status: "completed",
+                            result: resultData,
+                            completed_at: Math.floor(Date.now() / 1000),
+                        });
+                    } catch (err: any) {
+                        logger.error(`[Async] 视频生成任务 ${task.id} 失败: ${err.message}`);
+                        await taskStore.update(task.id, {
+                            status: "failed",
+                            error: err.message,
+                            completed_at: Math.floor(Date.now() / 1000),
+                        });
+                    }
+                    // Webhook 回调
+                    const finalTask = await taskStore.get(task.id);
+                    if (finalTask?.callback_url) {
+                        await sendWebhook(finalTask.callback_url, finalTask);
+                    }
+                });
+
+                return { task_id: task.id, status: "pending" };
+            }
+
+            // ====== 同步模式（原有逻辑不变） ======
             const generatedVideoUrl = await generateVideo(
                 model,
                 prompt,
