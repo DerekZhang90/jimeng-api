@@ -1,15 +1,15 @@
 ---
 name: jimeng-api
-description: Generate images using the Jimeng API based on text prompts. Use this skill when users request AI-generated images from the Jimeng (即梦AI) service, artwork, illustrations, or visual content creation. Supports text-to-image and image-to-image generation with customizable ratios and resolutions.
-version: 1.0.0
-dependencies: python>=3.7, requests>=2.28.0, Pillow>=9.0.0
+description: Generate images and videos using the Jimeng API (即梦AI). Use this skill when users request text-to-image, image-to-image, or video generation, or when they need to integrate Jimeng async task mode (`async: true`, `callback_url`, task polling via `/v1/tasks/:taskId`, cancellation, and webhook callbacks) into another project.
 ---
 
 # Jimeng API
 
 ## Overview
 
-This skill enables image generation using a locally deployed Jimeng API service (Docker). It converts text prompts into high-quality images and automatically downloads them to the project's `/pic` folder. The skill supports text-to-image generation, image-to-image composition, customizable aspect ratios (1:1, 16:9, etc.), and multiple resolution levels (1k, 2k, 4k).
+This skill supports two integration paths on top of a locally deployed Jimeng API service (Docker):
+- Synchronous local image generation via `scripts/generate_image.py` (downloads outputs to `/pic`).
+- Asynchronous task integration via HTTP API (`async: true`) for image/composition/video generation with polling or webhook callback handling.
 
 **API Endpoint**: `http://localhost:5100`
 
@@ -22,6 +22,8 @@ Use this skill when users request:
 - "Make an illustration of [subject]"
 - "Generate a 4K image of [description]"
 - "Transform this image to [style]" (image-to-image)
+- "在其他项目接入即梦异步任务模式"
+- "Add async task mode to my backend for Jimeng API"
 - Any request involving Jimeng AI image generation or visual content creation
 
 ## Quick Start
@@ -65,7 +67,7 @@ Example prompt to user:
 
 Rationale: Tools may “helpfully” add options (e.g., `--ratio 16:9`) that the user didn’t request, overriding script defaults. This is prohibited. Pass only the parameters the user asked for; otherwise, rely on defaults.
 
-### Basic Workflow
+### Basic Workflow (Select Sync or Async)
 
 1. **Receive user request** for image generation
 2. **Request Session ID** from the user if not already provided
@@ -75,8 +77,113 @@ Rationale: Tools may “helpfully” add options (e.g., `--ratio 16:9`) that the
    - Aspect ratio (1:1, 16:9, 4:3, etc.)
    - Resolution (1k, 2k, 4k)
    - Intelligent ratio (auto-detect based on prompt keywords)
-4. **Execute generation** using the `generate_image.py` script — REMINDER: **only pass parameters explicitly requested by the user; do not add/guess any optional flags**
-5. **Report results** — show file paths only. **DO NOT READ/OPEN/ANALYZE GENERATED IMAGES. DO NOT CALL ANY READ TOOL (e.g., `Read`, `view_image`). STOP AFTER SAVING.**
+4. **Select integration mode**:
+   - **Sync script mode (image only)**: Use `scripts/generate_image.py`.
+   - **Async API mode (image/composition/video)**: Submit with `"async": true`, persist `task_id`, then monitor task status via polling or webhook.
+5. **Complete by mode**:
+   - **Sync**: Report saved file paths only. **DO NOT READ/OPEN/ANALYZE GENERATED IMAGES.**
+   - **Async**: Return `task_id` immediately, then continue until terminal status (`completed`/`failed`/`cancelled`) and report final result/error.
+
+## Async Task Mode Integration (for Other Projects)
+
+### API Contract
+
+Use async mode on any generation endpoint by adding:
+
+```json
+{
+  "async": true,
+  "callback_url": "https://your-service.example/webhook"
+}
+```
+
+- `async` (optional, default `false`): Enable async task mode.
+- `callback_url` (optional): Receive completion/failure callbacks. Server retries 3 times with 5s/15s/30s delays.
+
+Async submit response format:
+
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "status": "pending"
+}
+```
+
+### Task Endpoints
+
+- Submit task:
+  - `POST /v1/images/generations`
+  - `POST /v1/images/edits`
+  - `POST /v1/videos/generations`
+- Query one task: `GET /v1/tasks/:taskId`
+- List tasks: `GET /v1/tasks?status=...&type=...&limit=...`
+- Cancel task: `POST /v1/tasks/:taskId/cancel` (only `pending` or `queued`)
+
+### Task Status Lifecycle
+
+Handle statuses as a state machine:
+
+- Running states: `pending`, `queued`, `processing`
+- Terminal success: `completed` (read `result`, same schema as sync response)
+- Terminal failure: `failed` (read `error`)
+- Terminal cancelled: `cancelled`
+
+### Integration Checklist
+
+1. Extend your generation request schema with `async?: boolean` and `callback_url?: string`.
+2. Submit generation with `async: true`.
+3. Persist `task_id` together with your business job ID.
+4. Implement one completion strategy:
+   - Poll `GET /v1/tasks/:taskId` every 3-5 seconds with timeout/backoff.
+   - Or expose a webhook endpoint and pass `callback_url`.
+5. On `completed`, consume `result` exactly like sync-mode output.
+6. On `failed`, surface the `error` message to user/business logs.
+7. Add cancellation support with `POST /v1/tasks/:taskId/cancel`.
+8. Handle deployment persistence:
+   - Prefer configuring `REDIS_URL` in production.
+   - Without Redis, service falls back to memory mode and task records are lost on restart.
+
+### Minimal Polling Example (TypeScript)
+
+```ts
+type TaskStatus = "pending" | "queued" | "processing" | "completed" | "failed" | "cancelled";
+
+async function submitAsyncImage(baseUrl: string, sessionId: string, prompt: string) {
+  const resp = await fetch(`${baseUrl}/v1/images/generations`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${sessionId}`,
+    },
+    body: JSON.stringify({
+      model: "jimeng-4.5",
+      prompt,
+      async: true,
+    }),
+  });
+  return await resp.json(); // { task_id, status: "pending" }
+}
+
+async function waitTaskDone(baseUrl: string, taskId: string, maxWaitMs = 10 * 60 * 1000) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const task = await fetch(`${baseUrl}/v1/tasks/${taskId}`).then((r) => r.json());
+    const status = task.status as TaskStatus;
+    if (status === "completed") return task.result;
+    if (status === "failed" || status === "cancelled") throw new Error(task.error || status);
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  throw new Error("Task polling timeout");
+}
+```
+
+### Webhook Handling Notes
+
+- Accept POST body schema identical to `GET /v1/tasks/:taskId`.
+- Read headers:
+  - `X-Webhook-Event`: `task.completed` or `task.failed`
+  - `X-Task-Id`: task UUID
+- Make handler idempotent (callbacks may retry).
 
 ## Image Generation Tasks
 
@@ -229,23 +336,33 @@ Do we have Session ID?
     ├─ No → Request Session ID from user → Store for session
     └─ Yes → Continue
     ↓
-Text-to-Image or Image-to-Image?
-    ├─ Text-to-Image
-    │   └─ Run: generate_image.py text "prompt" --session-id ID  (add --ratio/--resolution/--model ONLY if user explicitly requests)
-    └─ Image-to-Image
-        └─ Run: generate_image.py image "prompt" --session-id ID --images PATH1 [PATH2...]
+Sync script mode or Async API mode?
+    ├─ Sync script mode (image only)
+    │   ├─ Text-to-Image
+    │   │   └─ Run: generate_image.py text "prompt" --session-id ID (add optional flags ONLY if user explicitly requests)
+    │   └─ Image-to-Image
+    │       └─ Run: generate_image.py image "prompt" --session-id ID --images PATH1 [PATH2...]
+    └─ Async API mode (image/composition/video)
+        ├─ Submit generation with "async": true
+        ├─ Receive { task_id, status: "pending" }
+        ├─ Poll GET /v1/tasks/:taskId or wait callback_url
+        └─ Handle terminal status:
+            ├─ completed → consume result
+            ├─ failed → report error
+            └─ cancelled → report cancellation
     ↓
-Script executes:
+If sync script mode:
     1. Calls Jimeng API (文生图 or 图生图)
     2. Receives image URLs
     3. Downloads all images to /pic folder
     4. Reports file paths
     ↓
     Inform user of results
-        ├─ Success → Show file paths only
+        ├─ Sync success → Show file paths only
+        ├─ Async success → Show final result payload
         └─ Failure → Report error, suggest troubleshooting
         ↓
-    HARD STOP — DO NOT READ/OPEN/ANALYZE IMAGES; DO NOT CALL `Read`/`view_image`; TASK COMPLETE
+    HARD STOP (sync image workflow only) — DO NOT READ/OPEN/ANALYZE IMAGES; DO NOT CALL `Read`/`view_image`; TASK COMPLETE
 ```
 
 ## Troubleshooting
@@ -280,15 +397,30 @@ Script executes:
 - Other models (jimeng-3.0, nanobanana, etc.) will ignore this parameter
 - Solution: Use `jimeng-4.0`, `jimeng-4.1`, or `jimeng-4.5` if you need intelligent ratio detection
 
+**"Task stuck in queued/processing"**
+- Check service load and `TASK_MAX_CONCURRENT` setting
+- Confirm worker/service process is healthy
+- Query `GET /v1/tasks/:taskId` and inspect `queue_stats`
+
+**"Task not found after service restart"**
+- You are likely using in-memory fallback storage
+- Configure `REDIS_URL` to persist task records across restarts
+
+**"Webhook callback not received"**
+- Verify `callback_url` is publicly reachable and returns 2xx
+- Confirm receiver supports retries and idempotency
+- Check callback logs with `X-Task-Id` for correlation
+
 ## Best Practices
 
 1. **Request Session ID early** - Ask for it upfront if not already provided
 2. **Parameter discipline: Only pass explicitly requested parameters**
-3. **Clarify generation mode** - Determine if user wants text-to-image or image-to-image
+3. **Clarify integration mode** - Decide sync script vs async API before implementation
 4. **Use intelligent ratio when applicable** - Enable when prompt contains orientation hints
-5. **Inform about output location** - Always tell users where images are saved; **DO NOT read/open/analyze images; DO NOT call `Read`/`view_image`; STOP after saving**
-6. **Handle all variations** - API returns image-urls; download and present all of them
-7. **HARD STOP — REPORT FILE PATHS ONLY** - **DO NOT READ/OPEN/ANALYZE GENERATED IMAGES. NEVER CALL ANY READ TOOL AFTER GENERATION. TASK IS COMPLETE ONCE FILES ARE SAVED.**
+5. **Persist async task mapping** - Store `task_id` with your internal job ID for traceability
+6. **Prefer webhook + polling fallback** - Webhook for push completion, polling for resilience
+7. **Handle all variations** - Sync mode returns image URLs; async mode wraps final payload in `result`
+8. **Inform about output location in sync script mode** - Always tell users where files are saved; **DO NOT read/open/analyze images; DO NOT call `Read`/`view_image`; STOP after saving**
 
 ## Example Interactions
 
@@ -331,9 +463,20 @@ Claude: [Executes with --intelligent-ratio, auto-detects 9:16]
 Claude: "✅ 已根据'竖屏'关键词自动选择9:16比例,生成星空壁纸4张"
 ```
 
+**Example 5: Async integration for another backend**
+```
+User: "帮我在现有 Node.js 服务里接入即梦异步任务模式"
+Claude:
+1) 在生成请求里加 async/callback_url 字段
+2) 提交任务后立即返回 task_id
+3) 后台轮询 /v1/tasks/:taskId 或接收 callback_url 回调
+4) completed 时使用 result，failed 时抛出 error
+5) 加上 /v1/tasks/:taskId/cancel 取消逻辑
+```
+
 ## API Response Format
 
-The Jimeng API returns image variations per request:
+Synchronous image generation response:
 
 ```json
 {
@@ -347,7 +490,31 @@ The Jimeng API returns image variations per request:
 }
 ```
 
-All images are automatically downloaded and saved with sequential numbering.
+Async submit response:
+
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "status": "pending"
+}
+```
+
+Async task-completed response (`GET /v1/tasks/:taskId`):
+
+```json
+{
+  "task_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "status": "completed",
+  "type": "image",
+  "result": {
+    "created": 1763260188,
+    "data": [
+      {"url": "https://.../image1.png"},
+      {"url": "https://.../image2.png"}
+    ]
+  }
+}
+```
 
 ## Security Notes
 
