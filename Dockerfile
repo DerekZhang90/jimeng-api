@@ -11,7 +11,7 @@ RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
 
 # 安装所有依赖（包括devDependencies）
-RUN npm ci --registry https://registry.npmmirror.com/
+RUN npm ci
 
 # 复制源代码
 COPY . .
@@ -45,7 +45,7 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/package-lock.json ./package-lock.json
 
 # 只安装生产依赖
-RUN npm ci --omit=dev --registry https://registry.npmmirror.com/ && \
+RUN npm ci --omit=dev && \
     npm cache clean --force
 
 # 从构建阶段复制构建产物
