@@ -440,7 +440,7 @@ A: 可以。现在支持直接上传本地文件。请参考上方的“本地�
 1. **文生视频（Text-to-Video）**：纯文本提示词，不使用任何图片
 2. **图生视频（Image-to-Video）**：使用单张图片作为首帧
 3. **首尾帧视频（First-Last Frame）**：使用两张图片分别作为首帧和尾帧
-4. **全能模式（Omni Reference）**（新）：混合图片+视频作为参考素材，在 prompt 中通过 `@字段名` 引用素材并描述其作用。仅 `jimeng-video-seedance-2.0` 模型支持。
+4. **全能模式（Omni Reference）**（新）：混合图片+视频作为参考素材，在 prompt 中通过 `@字段名` 引用素材并描述其作用。仅 `jimeng-video-seedance-2.0` 和 `jimeng-video-seedance-2.0-fast` 模型支持。
 
 > **模式检测**：系统根据图片的存在情况自动判断生成模式：
 > - **无图片** → 文生视频模式
@@ -456,14 +456,14 @@ A: 可以。现在支持直接上传本地文件。请参考上方的“本地�
 - `duration` (number, 可选): 视频时长（秒）。不同模型支持的值：
   - `jimeng-video-veo3` / `jimeng-video-veo3.1`: `8`（固定）
   - `jimeng-video-sora2`: `4`（默认）、`8`、`12`
-  - `jimeng-video-seedance-2.0`: `4`~`15`（支持任意整数秒，默认`5`）
+  - `jimeng-video-seedance-2.0` / `jimeng-video-seedance-2.0-fast`: `4`~`15`（支持任意整数秒，默认`5`）
   - `jimeng-video-3.5-pro`: `5`（默认）、`10`、`12`
   - 其他模型: `5`（默认）、`10`
 - `file_paths` (array, 可选): 一个包含图片URL的数组，用于指定视频的**首帧**（数组第1个元素）和**尾帧**（数组第2个元素）。
 - `[file]` (file, 可选): 通过 `multipart/form-data` 方式上传的本地图片文件（最多2个），用于指定视频的**首帧**和**尾帧**。字段名可以任意，例如 `image1`。
 - `functionMode` (string, 可选): 生成模式。默认为 `"first_last_frames"`。支持的值：
   - `"first_last_frames"`（默认）：标准模式，根据图片数量自动判断文生视频/图生视频/首尾帧模式。
-  - `"omni_reference"`：全能模式。需要 `jimeng-video-seedance-2.0` 模型。通过指定字段名上传文件：`image_file_1`、`image_file_2`（图片）、`video_file`（视频），支持本地文件和网络URL。在 prompt 中使用 `@字段名` 引用素材。
+  - `"omni_reference"`：全能模式。需要 `jimeng-video-seedance-2.0` 或 `jimeng-video-seedance-2.0-fast` 模型。通过指定字段名上传文件：`image_file_1`、`image_file_2`（图片）、`video_file`（视频），支持本地文件和网络URL。在 prompt 中使用 `@字段名` 引用素材。
 - `response_format` (string, 可选): 响应格式，支持 `url` (默认) 或 `b64_json`。
 
 > **图片输入说明**:
@@ -473,7 +473,7 @@ A: 可以。现在支持直接上传本地文件。请参考上方的“本地�
 > - **重要**：一旦提供图片输入（图生视频或首尾帧视频），`ratio` 参数将被忽略，视频比例将由输入图片的实际比例决定。`resolution` 参数仍然有效。
 
 > **全能模式 (Omni Reference)**（新）:
-> - 需要 `functionMode=omni_reference` 且 `model=jimeng-video-seedance-2.0`。
+> - 需要 `functionMode=omni_reference` 且 `model=jimeng-video-seedance-2.0` 或 `jimeng-video-seedance-2.0-fast`。
 > - **图片输入**支持三种方式（优先级从高到低）：
 >   1. **本地文件上传**：通过 `multipart/form-data`，字段名为 `image_file_1`、`image_file_2`（如 curl `-F "image_file_1=@local.jpg"`）
 >   2. **表单字段传入 URL**：同样的字段名，值为 URL 字符串而非文件（如 curl `-F "image_file_1=https://..."`，无 `@` 前缀）。服务端会先下载图片再上传。
@@ -489,6 +489,7 @@ A: 可以。现在支持直接上传本地文件。请参考上方的“本地�
 
 **支持的视频模型**:
 - `jimeng-video-seedance-2.0` - Seedance 2.0，仅国内站支持，支持4~15秒时长，支持全能模式 (Omni Reference) **（最新）**
+- `jimeng-video-seedance-2.0-fast` - Seedance 2.0 Fast，仅国内站支持，支持4~15秒时长，支持全能模式 (Omni Reference)，速度更快
 - `jimeng-video-3.5-pro` - 专业版v3.5，国内/国际站均支持 **（默认）**
 - `jimeng-video-veo3` - Veo3模型，仅亚洲国际站 (HK/JP/SG) 支持，固定8秒时长
 - `jimeng-video-veo3.1` - Veo3.1模型，仅亚洲国际站 (HK/JP/SG) 支持，固定8秒时长
@@ -548,7 +549,7 @@ curl -X POST http://localhost:5100/v1/videos/generations \
   }'
 
 # 示例5: 全能模式 - 全部本地文件
-# 需要 jimeng-video-seedance-2.0 模型
+# 需要 jimeng-video-seedance-2.0 或 jimeng-video-seedance-2.0-fast 模型
 # 注意: prompt 中包含 @ 引用时，使用 --form-string 代替 -F（curl -F 会将 @ 解释为文件）
 curl -X POST http://localhost:5100/v1/videos/generations \
   -H "Authorization: Bearer YOUR_SESSION_ID" \
