@@ -36,31 +36,33 @@ import {
 // 模型名称
 const MODEL_NAME = "jimeng";
 // 设备ID
-const DEVICE_ID = Math.random() * 999999999999999999 + 7000000000000000000;
+const DEVICE_ID = process.env.JIMENG_DEVICE_ID || `7${util.generateRandomString({ length: 18, charset: "numeric" })}`;
 // WebID
-const WEB_ID = Math.random() * 999999999999999999 + 7000000000000000000;
+const WEB_ID = process.env.JIMENG_WEB_ID || `7${util.generateRandomString({ length: 18, charset: "numeric" })}`;
 // 用户ID
 const USER_ID = util.uuid(false);
+const DEFAULT_OS = process.env.JIMENG_OS || "windows";
+
 // 伪装headers
 const FAKE_HEADERS = {
   Accept: "application/json, text/plain, */*",
   "Accept-Encoding": "gzip, deflate, br, zstd",
-  "Accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-  "App-Sdk-Version": "48.0.0",
+  "Accept-language": process.env.JIMENG_ACCEPT_LANGUAGE || "zh-CN,zh;q=0.9,en;q=0.8",
+  "App-Sdk-Version": process.env.JIMENG_APP_SDK_VERSION || "48.0.0",
   Appvr: VERSION_CODE,
   "Cache-control": "no-cache",
-  Lan: "zh-Hans",
-  Loc: "cn",
+  Lan: process.env.JIMENG_LAN || "zh-Hans",
+  Loc: process.env.JIMENG_LOC || "cn",
   Pf: PLATFORM_CODE,
   Pragma: "no-cache",
   Priority: "u=1, i",
-  "Sec-Ch-Ua": '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+  "Sec-Ch-Ua": process.env.JIMENG_SEC_CH_UA || '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
   "Sec-Ch-Ua-Mobile": "?0",
-  "Sec-Ch-Ua-Platform": '"Windows"',
+  "Sec-Ch-Ua-Platform": process.env.JIMENG_SEC_CH_UA_PLATFORM || '"Windows"',
   "Sec-Fetch-Dest": "empty",
   "Sec-Fetch-Mode": "cors",
   "Sec-Fetch-Site": "same-origin",
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+  "User-Agent": process.env.JIMENG_USER_AGENT || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
 };
 // 文件最大大小
 const FILE_MAX_SIZE = 100 * 1024 * 1024;
@@ -316,7 +318,7 @@ export async function request(
     region: region,
     ...(isUS || isHK || isJP || isSG ? {} : { webId: WEB_ID }),
     da_version: DA_VERSION,
-    os: "windows",
+    os: DEFAULT_OS,
     web_component_open_flag: 1,
     web_version: WEB_VERSION,
     aigc_features: "app_lip_sync",

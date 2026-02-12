@@ -188,6 +188,20 @@ log_level: info # 日志级别: error, warning, info(默认), debug
 
 > **注意**: 不配置 `REDIS_URL` 也可正常使用异步模式，会自动降级为内存模式（服务重启后任务记录丢失）。
 
+#### 可选：客户端指纹（用于降低 1019 风控误判概率）
+
+当你在服务器环境（如 Railway）调用国内站接口，且 `sessionid` 是在某个浏览器/设备上获取的，推荐让服务端的“伪装指纹”尽量与获取 `sessionid` 的浏览器保持一致（例如：Mac 上获取的 `sessionid`，服务端也使用 Mac 的 UA/平台信息）。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `JIMENG_OS` | `windows` | 请求参数 `os` |
+| `JIMENG_USER_AGENT` | Windows Chrome UA | `User-Agent` |
+| `JIMENG_SEC_CH_UA_PLATFORM` | `"Windows"` | `Sec-Ch-Ua-Platform`（注意通常包含引号） |
+| `JIMENG_SEC_CH_UA` | Chrome 144 UA-CH | `Sec-Ch-Ua` |
+| `JIMENG_WEB_ID` | 启动时随机生成 | 请求参数 `webId` 以及 Cookie `_tea_web_id` |
+
+> 提示：如果你使用 Mac 浏览器获取 `sessionid`，可以在部署环境中将以上变量配置为对应的 Mac 值，然后重新部署观察是否还会出现 `1019 shark not pass`。
+
 ## 🤖 Claude Code Skill
 
 本项目提供了一个专用的 Claude Code Skill,方便在 Claude Code 中快速调用即梦API生成图片。
