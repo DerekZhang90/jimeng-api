@@ -395,6 +395,11 @@ export async function request(
 
       // 记录响应状态和头信息
       logger.info(`响应状态: ${response.status} ${response.statusText}`);
+      const upstreamRequestIp = response.headers?.["x-request-ip"];
+      const upstreamLogId = response.headers?.["x-tt-logid"];
+      if (upstreamRequestIp || upstreamLogId) {
+        logger.info(`响应头摘要: ${JSON.stringify({ "x-request-ip": upstreamRequestIp, "x-tt-logid": upstreamLogId })}`);
+      }
 
       // 流式响应直接返回response
       if (options.responseType == "stream") return response;
