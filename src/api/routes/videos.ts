@@ -90,6 +90,19 @@ export default {
                 .validate('body.response_format', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.async', v => _.isUndefined(v) || _.isBoolean(v) || v === 'true' || v === 'false')
                 .validate('body.callback_url', v => _.isUndefined(v) || (_.isString(v) && v.startsWith('http')))
+                // Optional anti-bot / fingerprint parameters (CN site may require these)
+                .validate('body.msToken', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.ms_token', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.a_bogus', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.aBogus', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.webId', v => _.isUndefined(v) || _.isString(v) || _.isFinite(v))
+                .validate('body.web_id', v => _.isUndefined(v) || _.isString(v) || _.isFinite(v))
+                .validate('body.os', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.userAgent', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.user_agent', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.secChUaPlatform', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.sec_ch_ua_platform', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.referer', v => _.isUndefined(v) || _.isString(v))
                 .validate('headers.authorization', _.isString);
 
             const functionMode = request.body.functionMode || 'first_last_frames';
@@ -103,8 +116,27 @@ export default {
                 duration = 5,
                 file_paths = [],
                 filePaths = [],
-                response_format = "url"
+                response_format = "url",
+                // optional anti-bot / fingerprint fields
+                msToken,
+                ms_token,
+                a_bogus,
+                aBogus,
+                webId,
+                web_id,
+                os,
+                userAgent,
+                user_agent,
+                secChUaPlatform,
+                sec_ch_ua_platform,
+                referer,
             } = request.body;
+
+            const finalMsToken = msToken || ms_token;
+            const finalABogus = a_bogus || aBogus;
+            const finalWebId = webId || web_id;
+            const finalUserAgent = userAgent || user_agent;
+            const finalSecChUaPlatform = secChUaPlatform || sec_ch_ua_platform;
 
             // 兼容两种参数名格式：file_paths 和 filePaths
             const finalFilePaths = filePaths.length > 0 ? filePaths : file_paths;
@@ -174,6 +206,13 @@ export default {
                                 files: request.files,
                                 materialUrls,
                                 functionMode,
+                                msToken: finalMsToken,
+                                a_bogus: finalABogus,
+                                webId: finalWebId,
+                                os,
+                                userAgent: finalUserAgent,
+                                secChUaPlatform: finalSecChUaPlatform,
+                                referer,
                             },
                             token
                         );
@@ -227,6 +266,13 @@ export default {
                     files: request.files, // 传递上传的文件
                     materialUrls,         // 传递 body 中的 URL 素材字段
                     functionMode,
+                    msToken: finalMsToken,
+                    a_bogus: finalABogus,
+                    webId: finalWebId,
+                    os,
+                    userAgent: finalUserAgent,
+                    secChUaPlatform: finalSecChUaPlatform,
+                    referer,
                 },
                 token
             );

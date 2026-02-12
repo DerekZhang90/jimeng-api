@@ -323,6 +323,20 @@ export async function request(
     ...(options.params || {}),
   };
 
+  const maskSensitiveParams = (params: Record<string, any>) => {
+    const masked = { ...(params || {}) } as Record<string, any>;
+    const redact = (key: string) => {
+      if (!Object.prototype.hasOwnProperty.call(masked, key)) return;
+      const raw = masked[key];
+      if (raw === null || typeof raw === "undefined") return;
+      const str = typeof raw === "string" ? raw : JSON.stringify(raw);
+      masked[key] = `[REDACTED:${str.length}]`;
+    };
+    redact("msToken");
+    redact("a_bogus");
+    return masked;
+  };
+
   const headers = {
     ...FAKE_HEADERS,
     Origin: origin,
@@ -340,7 +354,7 @@ export async function request(
     const maskedProxyUrl = proxyUrl.replace(/\/\/([^@/]+)@/i, "//***@");
     logger.info(`使用代理: ${maskedProxyUrl}`);
   }
-  logger.info(`请求参数: ${JSON.stringify(requestParams)}`);
+  logger.info(`请求参数: ${JSON.stringify(maskSensitiveParams(requestParams))}`);
   logger.info(`请求数据: ${JSON.stringify(options.data || {})}`);
 
   const proxyAgent = proxyUrl

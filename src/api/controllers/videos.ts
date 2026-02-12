@@ -6,7 +6,7 @@ import APIException from "@/lib/exceptions/APIException.ts";
 
 import EX from "@/api/consts/exceptions.ts";
 import util from "@/lib/util.ts";
-import { getCredit, receiveCredit, request, parseRegionFromToken, getAssistantId, checkImageContent, confirmAigcCompliance, RegionInfo } from "./core.ts";
+import { getCredit, receiveCredit, request, parseRegionFromToken, getAssistantId, checkImageContent, confirmAigcCompliance, RegionInfo, getRefererByRegion } from "./core.ts";
 import logger from "@/lib/logger.ts";
 import { SmartPoller, PollingStatus } from "@/lib/smart-poller.ts";
 import { DEFAULT_ASSISTANT_ID_CN, DEFAULT_ASSISTANT_ID_US, DEFAULT_ASSISTANT_ID_HK, DEFAULT_ASSISTANT_ID_JP, DEFAULT_ASSISTANT_ID_SG, DEFAULT_VIDEO_MODEL, DRAFT_VERSION, DRAFT_VERSION_OMNI, VIDEO_MODEL_MAP, VIDEO_MODEL_MAP_US, VIDEO_MODEL_MAP_ASIA } from "@/api/consts/common.ts";
@@ -195,6 +195,14 @@ export async function generateVideo(
     files = {},
     materialUrls = {},
     functionMode = "first_last_frames",
+    // Optional anti-bot / fingerprint params (mainly for CN site)
+    msToken,
+    a_bogus,
+    webId,
+    os,
+    userAgent,
+    secChUaPlatform,
+    referer,
   }: {
     ratio?: string;
     resolution?: string;
@@ -203,6 +211,13 @@ export async function generateVideo(
     files?: any;
     materialUrls?: Record<string, string>;
     functionMode?: string;
+    msToken?: string;
+    a_bogus?: string;
+    webId?: string | number;
+    os?: string;
+    userAgent?: string;
+    secChUaPlatform?: string;
+    referer?: string;
   },
   refreshToken: string
 ) {
@@ -287,6 +302,27 @@ export async function generateVideo(
   }
 
   let requestData: any;
+  const extraParams: Record<string, any> = {};
+  const extraHeaders: Record<string, any> = {};
+
+  // CN site may require additional "shark" anti-bot params for some endpoints.
+  // We only attach these to CN requests to avoid breaking international sites.
+  if (!regionInfo.isInternational) {
+    if (typeof webId !== "undefined" && webId !== null && `${webId}`.length > 0) extraParams.webId = webId;
+    if (typeof os !== "undefined" && os !== null && `${os}`.length > 0) extraParams.os = os;
+    if (typeof msToken !== "undefined" && msToken !== null && `${msToken}`.length > 0) extraParams.msToken = msToken;
+    if (typeof a_bogus !== "undefined" && a_bogus !== null && `${a_bogus}`.length > 0) extraParams.a_bogus = a_bogus;
+
+    // Prefer a real page referer to reduce risk; allow user override.
+    extraHeaders.Referer = referer || getRefererByRegion(refreshToken, "/ai-tool/generate?type=video");
+  }
+
+  if (typeof userAgent !== "undefined" && userAgent !== null && `${userAgent}`.length > 0) {
+    extraHeaders["User-Agent"] = userAgent;
+  }
+  if (typeof secChUaPlatform !== "undefined" && secChUaPlatform !== null && `${secChUaPlatform}`.length > 0) {
+    extraHeaders["Sec-Ch-Ua-Platform"] = secChUaPlatform;
+  }
 
   if (isOmniMode) {
     // ========== omni_reference 分支 ==========
@@ -549,6 +585,10 @@ export async function generateVideo(
         aigc_features: "app_lip_sync",
         web_version: "7.5.0",
         da_version: DRAFT_VERSION_OMNI,
+        ...extraParams,
+      },
+      headers: {
+        ...extraHeaders,
       },
       data: {
         extend: {
@@ -748,6 +788,10 @@ export async function generateVideo(
         aigc_features: "app_lip_sync",
         web_version: "7.5.0",
         da_version: DRAFT_VERSION,
+        ...extraParams,
+      },
+      headers: {
+        ...extraHeaders,
       },
       data: {
         extend: {

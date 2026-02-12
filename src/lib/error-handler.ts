@@ -60,6 +60,12 @@ export class JimengErrorHandler {
       
       case '5002':
         throw new APIException(EX.API_VIDEO_GENERATION_FAILED, `[视频生成失败]: ${errmsg}`);
+
+      case '1019':
+        throw new APIException(
+          EX.API_REQUEST_FAILED,
+          `[风控拦截]: ${errmsg} (错误码: 1019)。通常是即梦的反爬/风控校验失败：1) 确认服务已更新到最新版本(请求参数需包含 web_component_open_flag=1)，2) 降低频率/更换出口IP，3) 如官网请求包含 msToken/a_bogus，则需要携带“官网生成且与当前请求参数匹配”的 msToken/a_bogus（随机生成通常无效）。`
+        );
       
       default:
         throw new APIException(EX.API_REQUEST_FAILED, `[${operation}失败]: ${errmsg} (错误码: ${ret})`);
