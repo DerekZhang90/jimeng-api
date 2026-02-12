@@ -39,10 +39,6 @@ export const DRAFT_VERSION = "3.3.8";
 export const DRAFT_MIN_VERSION = "3.0.2";
 export const DRAFT_VERSION_OMNI = "3.3.9";
 
-// omni_reference 模式专用 benefit_type
-export const OMNI_BENEFIT_TYPE = "dreamina_video_seedance_20_video_add";
-export const OMNI_BENEFIT_TYPE_FAST = "dreamina_seedance_20_fast_with_video";
-
 // 图像模型映射
 export const IMAGE_MODEL_MAP = {
   "jimeng-5.0": "high_aes_general_v50",
