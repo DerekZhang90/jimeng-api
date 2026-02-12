@@ -177,6 +177,14 @@ log_level: info # 日志级别: error, warning, info(默认), debug
 | `REDIS_URL` | 空（降级内存模式） | Redis 连接地址，如 `redis://localhost:6379` |
 | `TASK_MAX_CONCURRENT` | `50` | 最大并发异步任务数 |
 | `TASK_EXPIRE_HOURS` | `1` | 已完成任务自动过期时间（小时） |
+| `SESSION_RATE_LIMIT_ENABLED` | `true` | 是否启用按 session 的请求限速 |
+| `SESSION_RATE_LIMIT_DISTRIBUTED` | `true` | 启用 Redis 分布式限速（需要配置 `REDIS_URL`） |
+| `SESSION_MIN_INTERVAL_MS` | `200` | 同一 session 两次上游请求的最小间隔（毫秒） |
+| `SESSION_MAX_CONCURRENT` | `20` | 同一 session 允许的最大并发上游请求数 |
+| `SESSION_MAX_QUEUE_PER_SESSION` | `2000` | 同一 session 限速队列最大长度（超过将快速失败） |
+| `SESSION_QUEUE_TIMEOUT_MS` | `120000` | 同一 session 的请求排队最长等待时间（毫秒） |
+| `SESSION_INFLIGHT_TTL_MS` | `120000` | 分布式模式下并发计数的租约 TTL（毫秒） |
+| `SESSION_REDIS_POLL_INTERVAL_MS` | `60` | 分布式模式下并发冲突时的轮询退避（毫秒） |
 
 > **注意**: 不配置 `REDIS_URL` 也可正常使用异步模式，会自动降级为内存模式（服务重启后任务记录丢失）。
 

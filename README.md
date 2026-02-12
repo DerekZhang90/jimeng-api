@@ -175,6 +175,14 @@ log_level: info # Log levels: error, warning, info (default), debug
 | `REDIS_URL` | empty (falls back to memory) | Redis connection URL, e.g. `redis://localhost:6379` |
 | `TASK_MAX_CONCURRENT` | `50` | Max concurrent async tasks |
 | `TASK_EXPIRE_HOURS` | `1` | Completed task expiry time (hours) |
+| `SESSION_RATE_LIMIT_ENABLED` | `true` | Enable per-session outbound request rate limiting |
+| `SESSION_RATE_LIMIT_DISTRIBUTED` | `true` | Enable Redis-backed distributed limiter (requires `REDIS_URL`) |
+| `SESSION_MIN_INTERVAL_MS` | `200` | Minimum interval between upstream requests for the same session (ms) |
+| `SESSION_MAX_CONCURRENT` | `20` | Max concurrent upstream requests for the same session |
+| `SESSION_MAX_QUEUE_PER_SESSION` | `2000` | Max queue length per session in limiter (fails fast when exceeded) |
+| `SESSION_QUEUE_TIMEOUT_MS` | `120000` | Max wait time in per-session limiter queue (ms) |
+| `SESSION_INFLIGHT_TTL_MS` | `120000` | Lease TTL for distributed in-flight counters (ms) |
+| `SESSION_REDIS_POLL_INTERVAL_MS` | `60` | Backoff polling interval for distributed concurrency contention (ms) |
 
 > **Note**: Async mode works without `REDIS_URL` — it automatically falls back to in-memory storage (task records are lost on restart).
 

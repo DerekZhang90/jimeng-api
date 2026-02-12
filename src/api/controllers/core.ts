@@ -9,6 +9,7 @@ import APIException from "@/lib/exceptions/APIException.ts";
 import EX from "@/api/consts/exceptions.ts";
 import logger from "@/lib/logger.ts";
 import util from "@/lib/util.ts";
+import sessionRateLimiter from "@/lib/session-rate-limiter.ts";
 import { JimengErrorHandler, JimengErrorResponse } from "@/lib/error-handler.ts";
 import { BASE_URL_DREAMINA_US, BASE_URL_DREAMINA_HK, DA_VERSION, WEB_VERSION } from "@/api/consts/dreamina.ts";
 
@@ -128,6 +129,18 @@ export function parseRegionFromToken(refreshToken: string): RegionInfo {
 }
 
 /**
+ * 提取可用于实际请求的 session token（去掉代理前缀、地区前缀）
+ */
+export function extractSessionToken(refreshToken: string): string {
+  const { token: tokenWithRegion } = parseProxyFromToken(refreshToken);
+  const { isUS, isHK, isJP, isSG } = parseRegionFromToken(tokenWithRegion);
+  const sessionToken = (isUS || isHK || isJP || isSG)
+    ? tokenWithRegion.substring(3)
+    : tokenWithRegion;
+  return sessionToken || tokenWithRegion;
+}
+
+/**
  * 根据地区获取 Referer
  *
  * @param refreshToken 刷新令牌
@@ -161,9 +174,7 @@ export function getAssistantId(regionInfo: RegionInfo): number {
 export function generateCookie(refreshToken: string) {
   const { token: tokenWithRegion } = parseProxyFromToken(refreshToken);
   const { isUS, isHK, isJP, isSG } = parseRegionFromToken(tokenWithRegion);
-  const token = (isUS || isHK || isJP || isSG)
-    ? tokenWithRegion.substring(3)
-    : tokenWithRegion;
+  const token = extractSessionToken(tokenWithRegion);
 
   let storeRegion = 'cn-gd';
   if (isUS) storeRegion = 'us';
@@ -249,8 +260,9 @@ export async function request(
 ) {
   const { token: tokenWithRegion, proxyUrl } = parseProxyFromToken(refreshToken);
   const regionInfo = parseRegionFromToken(tokenWithRegion);
+  const sessionToken = extractSessionToken(tokenWithRegion);
   const { isUS, isHK, isJP, isSG } = regionInfo;
-  await acquireToken(regionInfo.isInternational ? tokenWithRegion.substring(3) : tokenWithRegion);
+  await acquireToken(sessionToken);
   const deviceTime = util.unixTimestamp();
   const sign = util.md5(
     `9e2c|${uri.slice(-7)}|${PLATFORM_CODE}|${VERSION_CODE}|${deviceTime}||11ac`
@@ -340,12 +352,16 @@ export async function request(
   let lastError = null;
 
   while (retries <= maxRetries) {
+    let releaseSessionSlot: (() => Promise<void>) | null = null;
     try {
       if (retries > 0) {
         logger.info(`第 ${retries} 次重试请求: ${method.toUpperCase()} ${fullUrl}`);
         // 重试前等待一段时间
         await new Promise(resolve => setTimeout(resolve, RETRY_CONFIG.RETRY_DELAY));
       }
+
+      // 按 session 控制请求速率，避免单 token 过快触发风控
+      releaseSessionSlot = await sessionRateLimiter.acquire(sessionToken);
 
       const response = await axios.request({
         method,
@@ -406,6 +422,10 @@ export async function request(
 
       // 其他错误直接抛出
       break;
+    } finally {
+      if (releaseSessionSlot) {
+        await releaseSessionSlot();
+      }
     }
   }
 
