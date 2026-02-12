@@ -10,6 +10,52 @@ import taskQueue from '@/lib/task-queue.ts';
 import { sendWebhook } from '@/lib/webhook.ts';
 import logger from '@/lib/logger.ts';
 
+const MAX_STANDARD_INPUT_IMAGES = 2;
+const MAX_OMNI_MATERIALS = 9;
+const OMNI_IMAGE_FIELD_PATTERN = /^image_file_(\d+)$/;
+const OMNI_VIDEO_FIELD_PATTERN = /^video_file(?:_(\d+))?$/;
+
+function collectUploadedFileEntries(files: any): Array<{ fieldName: string; file: any }> {
+    if (!files || !_.isObject(files)) return [];
+    const entries: Array<{ fieldName: string; file: any }> = [];
+
+    for (const [fieldName, fieldValue] of Object.entries(files)) {
+        const fileList = Array.isArray(fieldValue) ? fieldValue : [fieldValue];
+        for (const file of fileList) {
+            if (file) entries.push({ fieldName, file });
+        }
+    }
+
+    return entries;
+}
+
+function isOmniMaterialField(fieldName: string): boolean {
+    const imageMatch = fieldName.match(OMNI_IMAGE_FIELD_PATTERN);
+    if (imageMatch) {
+        const idx = Number(imageMatch[1]);
+        return Number.isInteger(idx) && idx >= 1 && idx <= MAX_OMNI_MATERIALS;
+    }
+
+    const videoMatch = fieldName.match(OMNI_VIDEO_FIELD_PATTERN);
+    if (!videoMatch) return false;
+    if (!videoMatch[1]) return true; // 兼容旧字段名 video_file
+    const idx = Number(videoMatch[1]);
+    return Number.isInteger(idx) && idx >= 1 && idx <= MAX_OMNI_MATERIALS;
+}
+
+function collectOmniBodyMaterialUrls(body: any): Record<string, string> {
+    const materialUrls: Record<string, string> = {};
+    if (!body || !_.isObject(body)) return materialUrls;
+
+    for (const [key, value] of Object.entries(body)) {
+        if (typeof value === 'string' && value.startsWith('http') && isOmniMaterialField(key)) {
+            materialUrls[key] = value;
+        }
+    }
+
+    return materialUrls;
+}
+
 export default {
 
     prefix: '/v1/videos',
@@ -38,9 +84,8 @@ export default {
                     }
                     return Number.isInteger(num) && num >= 4 && num <= 15;
                 })
-                // 限制图片URL数量最多2个
-                .validate('body.file_paths', v => _.isUndefined(v) || (_.isArray(v) && v.length <= 2))
-                .validate('body.filePaths', v => _.isUndefined(v) || (_.isArray(v) && v.length <= 2))
+                .validate('body.file_paths', v => _.isUndefined(v) || _.isArray(v))
+                .validate('body.filePaths', v => _.isUndefined(v) || _.isArray(v))
                 .validate('body.functionMode', v => _.isUndefined(v) || (_.isString(v) && ['first_last_frames', 'omni_reference'].includes(v)))
                 .validate('body.response_format', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.async', v => _.isUndefined(v) || _.isBoolean(v) || v === 'true' || v === 'false')
@@ -49,35 +94,6 @@ export default {
 
             const functionMode = request.body.functionMode || 'first_last_frames';
             const isOmniMode = functionMode === 'omni_reference';
-
-            // omni_reference 模式最多3个文件 (2图片+1视频)，普通模式最多2个
-            const uploadedFiles = request.files ? _.values(request.files) : [];
-            const maxFiles = isOmniMode ? 3 : 2;
-            if (uploadedFiles.length > maxFiles) {
-                throw new Error(isOmniMode ? '全能模式最多上传3个文件(2图片+1视频)' : '最多只能上传2个图片文件');
-            }
-            // omni_reference 模式至少需要上传1个素材文件
-            const hasFilePaths = (request.body.filePaths?.length > 0) || (request.body.file_paths?.length > 0);
-            // 检测 body 中以 URL 字符串形式传入的素材字段（如 -F "image_file_1=https://..."）
-            const imageUrls: Record<string, string> = {};
-            if (typeof request.body.image_file_1 === 'string' && request.body.image_file_1.startsWith('http')) {
-                imageUrls.image_file_1 = request.body.image_file_1;
-            }
-            if (typeof request.body.image_file_2 === 'string' && request.body.image_file_2.startsWith('http')) {
-                imageUrls.image_file_2 = request.body.image_file_2;
-            }
-            const hasImageUrls = Object.keys(imageUrls).length > 0;
-            // 检测 body 中以 URL 字符串形式传入的视频字段
-            const videoUrl = (typeof request.body.video_file === 'string' && request.body.video_file.startsWith('http'))
-                ? request.body.video_file : undefined;
-            if (isOmniMode && uploadedFiles.length === 0 && !hasFilePaths && !hasImageUrls && !videoUrl) {
-                throw new Error('全能模式(omni_reference)至少需要上传1个素材文件(图片或视频)或提供素材URL');
-            }
-
-            // refresh_token切分
-            const tokens = tokenSplit(request.headers.authorization);
-            // 随机挑选一个refresh_token
-            const token = _.sample(tokens);
 
             const {
                 model = DEFAULT_MODEL,
@@ -90,13 +106,44 @@ export default {
                 response_format = "url"
             } = request.body;
 
+            // 兼容两种参数名格式：file_paths 和 filePaths
+            const finalFilePaths = filePaths.length > 0 ? filePaths : file_paths;
+            if (!isOmniMode && finalFilePaths.length > MAX_STANDARD_INPUT_IMAGES) {
+                throw new Error('最多支持2张输入图片');
+            }
+            if (isOmniMode && finalFilePaths.length > MAX_OMNI_MATERIALS) {
+                throw new Error('全能模式通过 file_paths/filePaths 最多支持9个素材URL');
+            }
+
+            const uploadedFileEntries = collectUploadedFileEntries(request.files);
+            const omniUploadedEntries = uploadedFileEntries.filter(entry => isOmniMaterialField(entry.fieldName));
+            const uploadedMaterialCount = isOmniMode ? omniUploadedEntries.length : uploadedFileEntries.length;
+            const maxUploadedFiles = isOmniMode ? MAX_OMNI_MATERIALS : MAX_STANDARD_INPUT_IMAGES;
+            if (uploadedMaterialCount > maxUploadedFiles) {
+                throw new Error(isOmniMode
+                    ? '全能模式最多上传9个素材文件'
+                    : '最多只能上传2个图片文件');
+            }
+            if (isOmniMode && uploadedFileEntries.length > omniUploadedEntries.length) {
+                throw new Error('全能模式仅支持 image_file_1~image_file_9、video_file、video_file_1~video_file_9 字段');
+            }
+
+            const materialUrls = isOmniMode ? collectOmniBodyMaterialUrls(request.body) : {};
+            const hasFilePaths = finalFilePaths.length > 0;
+            const hasMaterialUrls = Object.keys(materialUrls).length > 0;
+            if (isOmniMode && uploadedMaterialCount === 0 && !hasFilePaths && !hasMaterialUrls) {
+                throw new Error('全能模式(omni_reference)至少需要上传1个素材文件(图片或视频)或提供素材URL');
+            }
+
+            // refresh_token切分
+            const tokens = tokenSplit(request.headers.authorization);
+            // 随机挑选一个refresh_token
+            const token = _.sample(tokens);
+
             // 如果是 multipart/form-data，需要将字符串转换为数字
             const finalDuration = isMultiPart && typeof duration === 'string'
                 ? parseInt(duration)
                 : duration;
-
-            // 兼容两种参数名格式：file_paths 和 filePaths
-            const finalFilePaths = filePaths.length > 0 ? filePaths : file_paths;
 
             // 处理 multipart 中的 async 参数（字符串转布尔）
             const isAsync = isMultiPart && typeof request.body.async === 'string'
@@ -125,8 +172,7 @@ export default {
                                 duration: finalDuration,
                                 filePaths: finalFilePaths,
                                 files: request.files,
-                                imageUrls,
-                                videoUrl,
+                                materialUrls,
                                 functionMode,
                             },
                             token
@@ -179,8 +225,7 @@ export default {
                     duration: finalDuration,
                     filePaths: finalFilePaths,
                     files: request.files, // 传递上传的文件
-                    imageUrls,            // 传递 body 中的 URL 图片字段
-                    videoUrl,             // 传递 body 中的 URL 视频字段
+                    materialUrls,         // 传递 body 中的 URL 素材字段
                     functionMode,
                 },
                 token

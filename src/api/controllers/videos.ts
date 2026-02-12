@@ -16,6 +16,9 @@ import { extractVideoUrl, fetchHighQualityVideoUrl } from "@/lib/image-utils.ts"
 import { uploadVideoFromUrl } from "@/lib/video-uploader.ts";
 
 export const DEFAULT_MODEL = DEFAULT_VIDEO_MODEL;
+const MAX_OMNI_MATERIALS = 9;
+const OMNI_IMAGE_FIELD_PATTERN = /^image_file_(\d+)$/;
+const OMNI_VIDEO_FIELD_PATTERN = /^video_file(?:_(\d+))?$/;
 
 export function getModel(model: string, regionInfo: RegionInfo) {
   // 根据站点选择不同的模型映射
@@ -56,6 +59,34 @@ function getVideoBenefitType(model: string): string {
     return "dreamina_video_seedance_15";
   }
   return "basic_video_operation_vgfm_v_three";
+}
+
+function getOmniMaterialType(fieldName: string): "image" | "video" | null {
+  const imageMatch = fieldName.match(OMNI_IMAGE_FIELD_PATTERN);
+  if (imageMatch) {
+    const idx = Number(imageMatch[1]);
+    return Number.isInteger(idx) && idx >= 1 && idx <= MAX_OMNI_MATERIALS ? "image" : null;
+  }
+
+  const videoMatch = fieldName.match(OMNI_VIDEO_FIELD_PATTERN);
+  if (!videoMatch) return null;
+  if (!videoMatch[1]) return "video"; // 兼容旧字段名 video_file
+  const idx = Number(videoMatch[1]);
+  return Number.isInteger(idx) && idx >= 1 && idx <= MAX_OMNI_MATERIALS ? "video" : null;
+}
+
+function collectUploadedFileEntries(files: any): Array<{ fieldName: string; file: any }> {
+  if (!files || !_.isObject(files)) return [];
+  const entries: Array<{ fieldName: string; file: any }> = [];
+
+  for (const [fieldName, fieldValue] of Object.entries(files)) {
+    const fileList = Array.isArray(fieldValue) ? fieldValue : [fieldValue];
+    for (const file of fileList) {
+      if (file) entries.push({ fieldName, file });
+    }
+  }
+
+  return entries;
 }
 
 // 处理本地上传的文件
@@ -162,8 +193,7 @@ export async function generateVideo(
     duration = 5,
     filePaths = [],
     files = {},
-    imageUrls = {},
-    videoUrl,
+    materialUrls = {},
     functionMode = "first_last_frames",
   }: {
     ratio?: string;
@@ -171,8 +201,7 @@ export async function generateVideo(
     duration?: number;
     filePaths?: string[];
     files?: any;
-    imageUrls?: Record<string, string>;
-    videoUrl?: string;
+    materialUrls?: Record<string, string>;
     functionMode?: string;
   },
   refreshToken: string
@@ -263,18 +292,6 @@ export async function generateVideo(
     // ========== omni_reference 分支 ==========
     logger.info(`进入 omni_reference 全能模式`);
 
-    // 按字段名取出具名文件
-    const imageFile1 = files?.image_file_1;
-    const imageFile2 = files?.image_file_2;
-    const videoFile = files?.video_file;
-
-    const hasImageUrls = imageUrls && (imageUrls.image_file_1 || imageUrls.image_file_2);
-
-    if (!imageFile1 && !imageFile2 && !videoFile && (!filePaths || filePaths.length === 0) && !hasImageUrls && !videoUrl) {
-      throw new APIException(EX.API_REQUEST_FAILED,
-        `omni_reference 模式需要至少上传一个素材文件 (image_file_1, image_file_2, video_file) 或提供素材URL`);
-    }
-
     // 素材注册表: fieldName → { idx, type, uploadResult }
     interface MaterialEntry {
       idx: number;
@@ -284,120 +301,167 @@ export async function generateVideo(
       imageUri?: string;
       videoResult?: VideoUploadResult;
     }
+
     const materialRegistry: Map<string, MaterialEntry> = new Map();
+    const canonicalFieldNames = new Set<string>();
     let materialIdx = 0;
 
-    // canonical key 集合，防止 originalFilename 覆盖
-    const canonicalKeys = new Set(["image_file_1", "image_file_2", "video_file"]);
-    // 安全注册别名：originalFilename 不与 canonical key 冲突时才注册
-    function registerAlias(filename: string, entry: MaterialEntry) {
-      if (!canonicalKeys.has(filename) && !materialRegistry.has(filename)) {
-        materialRegistry.set(filename, entry);
+    function registerAlias(alias: string | undefined, entry: MaterialEntry) {
+      if (!alias) return;
+      if (!canonicalFieldNames.has(alias) && !materialRegistry.has(alias)) {
+        materialRegistry.set(alias, entry);
       }
     }
 
-    // 串行上传素材
-    if (imageFile1) {
+    function registerMaterial(entry: MaterialEntry) {
+      materialRegistry.set(entry.fieldName, entry);
+      canonicalFieldNames.add(entry.fieldName);
+      registerAlias(entry.originalFilename, entry);
+    }
+
+    function ensureMaterialCapacity(fieldName: string) {
+      if (canonicalFieldNames.size >= MAX_OMNI_MATERIALS) {
+        throw new APIException(
+          EX.API_REQUEST_FAILED,
+          `omni_reference 模式最多支持 ${MAX_OMNI_MATERIALS} 个素材，无法再添加 ${fieldName}`
+        );
+      }
+    }
+
+    const uploadedFileEntries = collectUploadedFileEntries(files);
+    const hasUploadedMaterial = uploadedFileEntries.some(entry => getOmniMaterialType(entry.fieldName));
+    const hasBodyMaterialUrls = !!materialUrls && Object.keys(materialUrls).length > 0;
+    if (!hasUploadedMaterial && (!filePaths || filePaths.length === 0) && !hasBodyMaterialUrls) {
+      throw new APIException(
+        EX.API_REQUEST_FAILED,
+        `omni_reference 模式需要至少上传一个素材文件或提供素材URL`
+      );
+    }
+
+    // 1) 处理 multipart 素材
+    for (const { fieldName, file } of uploadedFileEntries) {
+      const materialType = getOmniMaterialType(fieldName);
+      if (!materialType || canonicalFieldNames.has(fieldName)) continue;
+      ensureMaterialCapacity(fieldName);
+
       try {
-        logger.info(`[omni] 上传 image_file_1: ${imageFile1.originalFilename}`);
-        const buf = await fs.readFile(imageFile1.filepath);
-        const uri = await uploadImageBuffer(buf, refreshToken, regionInfo);
-        await checkImageContent(uri, refreshToken, regionInfo);
-        const entry: MaterialEntry = { idx: materialIdx++, type: "image", fieldName: "image_file_1", originalFilename: imageFile1.originalFilename, imageUri: uri };
-        materialRegistry.set("image_file_1", entry);
-        registerAlias(imageFile1.originalFilename, entry);
-        logger.info(`[omni] image_file_1 上传成功: ${uri}`);
-      } catch (error: any) {
-        throw new APIException(EX.API_REQUEST_FAILED, `image_file_1 处理失败: ${error.message}`);
-      }
-    }
-
-    if (imageFile2) {
-      try {
-        logger.info(`[omni] 上传 image_file_2: ${imageFile2.originalFilename}`);
-        const buf = await fs.readFile(imageFile2.filepath);
-        const uri = await uploadImageBuffer(buf, refreshToken, regionInfo);
-        await checkImageContent(uri, refreshToken, regionInfo);
-        const entry: MaterialEntry = { idx: materialIdx++, type: "image", fieldName: "image_file_2", originalFilename: imageFile2.originalFilename, imageUri: uri };
-        materialRegistry.set("image_file_2", entry);
-        registerAlias(imageFile2.originalFilename, entry);
-        logger.info(`[omni] image_file_2 上传成功: ${uri}`);
-      } catch (error: any) {
-        throw new APIException(EX.API_REQUEST_FAILED, `image_file_2 处理失败: ${error.message}`);
-      }
-    }
-
-    // 通过 body 中的 URL 字段补充未被 multipart 占用的图片槽位
-    // 支持 curl -F "image_file_1=https://..." 方式（无 @ 前缀，作为文本字段传入）
-    if (imageUrls) {
-      for (const [fieldName, url] of Object.entries(imageUrls)) {
-        if (!url || materialRegistry.has(fieldName)) continue; // 已被 multipart 占用则跳过
-        try {
-          logger.info(`[omni] 从body URL上传 ${fieldName}: ${url}`);
-          const uri = await uploadImageFromUrl(url, refreshToken, regionInfo);
+        if (materialType === "image") {
+          logger.info(`[omni] 上传 ${fieldName}: ${file.originalFilename}`);
+          const buf = await fs.readFile(file.filepath);
+          const uri = await uploadImageBuffer(buf, refreshToken, regionInfo);
           await checkImageContent(uri, refreshToken, regionInfo);
-          const entry: MaterialEntry = { idx: materialIdx++, type: "image", fieldName, originalFilename: url, imageUri: uri };
-          materialRegistry.set(fieldName, entry);
-          logger.info(`[omni] ${fieldName} body URL上传成功: ${uri}`);
+          registerMaterial({
+            idx: materialIdx++,
+            type: "image",
+            fieldName,
+            originalFilename: file.originalFilename || fieldName,
+            imageUri: uri,
+          });
+          logger.info(`[omni] ${fieldName} 上传成功: ${uri}`);
+        } else {
+          logger.info(`[omni] 上传 ${fieldName}: ${file.originalFilename}`);
+          const buf = await fs.readFile(file.filepath);
+          const vResult = await uploadVideoBuffer(buf, refreshToken, regionInfo);
+          registerMaterial({
+            idx: materialIdx++,
+            type: "video",
+            fieldName,
+            originalFilename: file.originalFilename || fieldName,
+            videoResult: vResult,
+          });
+          logger.info(`[omni] ${fieldName} 上传成功: vid=${vResult.vid}, ${vResult.videoMeta.width}x${vResult.videoMeta.height}, ${vResult.videoMeta.duration}s`);
+        }
+      } catch (error: any) {
+        throw new APIException(EX.API_REQUEST_FAILED, `${fieldName} 处理失败: ${error.message}`);
+      }
+    }
+
+    // 2) 处理 body URL 素材
+    if (materialUrls) {
+      for (const [fieldName, url] of Object.entries(materialUrls)) {
+        if (!url || canonicalFieldNames.has(fieldName)) continue;
+        const materialType = getOmniMaterialType(fieldName);
+        if (!materialType) continue;
+        ensureMaterialCapacity(fieldName);
+
+        try {
+          if (materialType === "image") {
+            logger.info(`[omni] 从body URL上传 ${fieldName}: ${url}`);
+            const uri = await uploadImageFromUrl(url, refreshToken, regionInfo);
+            await checkImageContent(uri, refreshToken, regionInfo);
+            registerMaterial({
+              idx: materialIdx++,
+              type: "image",
+              fieldName,
+              originalFilename: url,
+              imageUri: uri,
+            });
+            logger.info(`[omni] ${fieldName} body URL上传成功: ${uri}`);
+          } else {
+            logger.info(`[omni] 从body URL上传 ${fieldName}: ${url}`);
+            const vResult = await uploadVideoFromUrl(url, refreshToken, regionInfo);
+            registerMaterial({
+              idx: materialIdx++,
+              type: "video",
+              fieldName,
+              originalFilename: url,
+              videoResult: vResult,
+            });
+            logger.info(`[omni] ${fieldName} body URL上传成功: vid=${vResult.vid}, ${vResult.videoMeta.width}x${vResult.videoMeta.height}, ${vResult.videoMeta.duration}s`);
+          }
         } catch (error: any) {
-          throw new APIException(EX.API_REQUEST_FAILED, `${fieldName} URL图片处理失败: ${error.message}`);
+          throw new APIException(EX.API_REQUEST_FAILED, `${fieldName} URL素材处理失败: ${error.message}`);
         }
       }
     }
 
-    // 通过 filePaths 数组补充未被 multipart/imageUrls 占用的图片槽位
+    // 3) 使用 filePaths 顺序补充图片槽位（image_file_1~image_file_9）
     if (filePaths && filePaths.length > 0) {
-      const urlSlots: { fieldName: string; url: string }[] = [];
-      const slot1Taken = materialRegistry.has("image_file_1");
-      const slot2Taken = materialRegistry.has("image_file_2");
-      if (!slot1Taken && filePaths[0]) {
-        urlSlots.push({ fieldName: "image_file_1", url: filePaths[0] });
-      }
-      if (!slot2Taken && filePaths[slot1Taken ? 0 : 1]) {
-        urlSlots.push({ fieldName: "image_file_2", url: filePaths[slot1Taken ? 0 : 1] });
+      const availableImageSlots: string[] = [];
+      for (let i = 1; i <= MAX_OMNI_MATERIALS; i++) {
+        const slotName = `image_file_${i}`;
+        if (!canonicalFieldNames.has(slotName)) {
+          availableImageSlots.push(slotName);
+        }
       }
 
-      for (const slot of urlSlots) {
+      for (const imageUrl of filePaths) {
+        if (!imageUrl) continue;
+        const slotName = availableImageSlots.shift();
+        if (!slotName) {
+          throw new APIException(
+            EX.API_REQUEST_FAILED,
+            `omni_reference 模式已占满 ${MAX_OMNI_MATERIALS} 个素材槽位，无法继续使用 filePaths 添加素材`
+          );
+        }
+        ensureMaterialCapacity(slotName);
+
         try {
-          logger.info(`[omni] 从URL上传 ${slot.fieldName}: ${slot.url}`);
-          const uri = await uploadImageFromUrl(slot.url, refreshToken, regionInfo);
+          logger.info(`[omni] 从URL上传 ${slotName}: ${imageUrl}`);
+          const uri = await uploadImageFromUrl(imageUrl, refreshToken, regionInfo);
           await checkImageContent(uri, refreshToken, regionInfo);
-          const entry: MaterialEntry = { idx: materialIdx++, type: "image", fieldName: slot.fieldName, originalFilename: slot.url, imageUri: uri };
-          materialRegistry.set(slot.fieldName, entry);
-          logger.info(`[omni] ${slot.fieldName} URL上传成功: ${uri}`);
+          registerMaterial({
+            idx: materialIdx++,
+            type: "image",
+            fieldName: slotName,
+            originalFilename: imageUrl,
+            imageUri: uri,
+          });
+          logger.info(`[omni] ${slotName} URL上传成功: ${uri}`);
         } catch (error: any) {
-          throw new APIException(EX.API_REQUEST_FAILED, `${slot.fieldName} URL图片处理失败: ${error.message}`);
+          throw new APIException(EX.API_REQUEST_FAILED, `${slotName} URL图片处理失败: ${error.message}`);
         }
       }
     }
 
-    if (videoFile) {
-      try {
-        logger.info(`[omni] 上传 video_file: ${videoFile.originalFilename}`);
-        const buf = await fs.readFile(videoFile.filepath);
-        const vResult = await uploadVideoBuffer(buf, refreshToken, regionInfo);
-        const entry: MaterialEntry = { idx: materialIdx++, type: "video", fieldName: "video_file", originalFilename: videoFile.originalFilename, videoResult: vResult };
-        materialRegistry.set("video_file", entry);
-        registerAlias(videoFile.originalFilename, entry);
-        logger.info(`[omni] video_file 上传成功: vid=${vResult.vid}, ${vResult.videoMeta.width}x${vResult.videoMeta.height}, ${vResult.videoMeta.duration}s`);
-      } catch (error: any) {
-        throw new APIException(EX.API_REQUEST_FAILED, `video_file 处理失败: ${error.message}`);
-      }
-    } else if (videoUrl && !materialRegistry.has("video_file")) {
-      // 通过 body 中的 URL 字段上传视频（如 curl -F "video_file=https://..."，无 @ 前缀）
-      try {
-        logger.info(`[omni] 从body URL上传 video_file: ${videoUrl}`);
-        const vResult = await uploadVideoFromUrl(videoUrl, refreshToken, regionInfo);
-        const entry: MaterialEntry = { idx: materialIdx++, type: "video", fieldName: "video_file", originalFilename: videoUrl, videoResult: vResult };
-        materialRegistry.set("video_file", entry);
-        logger.info(`[omni] video_file body URL上传成功: vid=${vResult.vid}, ${vResult.videoMeta.width}x${vResult.videoMeta.height}, ${vResult.videoMeta.duration}s`);
-      } catch (error: any) {
-        throw new APIException(EX.API_REQUEST_FAILED, `video_file URL视频处理失败: ${error.message}`);
-      }
+    if (canonicalFieldNames.size === 0) {
+      throw new APIException(EX.API_REQUEST_FAILED, `omni_reference 模式未识别到有效素材字段`);
     }
 
     // 构建 material_list（按注册顺序）
-    const orderedEntries = [...new Map([...materialRegistry].filter(([k, v]) => k === v.fieldName)).values()]
+    const orderedEntries = [...canonicalFieldNames]
+      .map(fieldName => materialRegistry.get(fieldName))
+      .filter((entry): entry is MaterialEntry => !!entry)
       .sort((a, b) => a.idx - b.idx);
 
     const material_list: any[] = [];
