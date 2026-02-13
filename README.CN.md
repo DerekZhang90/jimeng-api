@@ -480,6 +480,12 @@ A: 可以。现在支持直接上传本地文件。请参考上方的“本地�
   - `"omni_reference"`：全能模式。需要 `jimeng-video-seedance-2.0` 或 `jimeng-video-seedance-2.0-fast` 模型。通过指定字段名上传文件：`image_file_1~image_file_9`（图片）、`video_file` / `video_file_1~video_file_9`（视频），支持本地文件和网络URL。在 prompt 中使用 `@字段名` 引用素材。
 - `response_format` (string, 可选): 响应格式，支持 `url` (默认) 或 `b64_json`。
 
+**关于返回的视频 URL（很重要）**：
+- `data[0].url`：主返回 URL（默认会优先返回 `hq_url`，获取不到则回退到 `preview_url`）。
+- `data[0].preview_url`：从轮询接口 `item_list` 提取到的播放/预览 URL（通常更通用，跨网络环境更容易直接下载）。
+- `data[0].hq_url`：通过 `get_local_item_list` 提取到的“下载/高清”URL（可能对出口/IP/地域更敏感；如果你在另一个环境下载出现 404/403，优先改用 `preview_url` 或让下载也走同一个代理出口）。
+- `data[0].history_id` / `data[0].item_id`：用于排查问题或外部系统二次查询。
+
 > **图片输入说明**:
 > - 您可以通过 `file_paths` (URL数组) 或直接上传文件两种方式提供输入图片。
 > - 如果两种方式同时提供，系统将**优先使用本地上传的文件**。
@@ -684,7 +690,14 @@ curl http://localhost:5100/v1/tasks/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
   "completed_at": 1700000120,
   "result": {
     "created": 1700000120,
-    "data": [{ "url": "https://...", "revised_prompt": "一只猫在跳舞" }]
+    "data": [{
+      "url": "https://...",
+      "revised_prompt": "一只猫在跳舞",
+      "preview_url": "https://vxx-artist.vlabvod.com/...",
+      "hq_url": "https://vxx-dreamnia.jimeng.com/...",
+      "history_id": "104xxxxxxxxxxxxx",
+      "item_id": "760xxxxxxxxxxxxxxx"
+    }]
   },
   "queue_stats": { "running": 3, "queued": 0, "maxConcurrent": 50 }
 }
@@ -752,6 +765,15 @@ curl -X POST http://localhost:5100/v1/tasks/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 - SOCKS4 代理: `socks4://host:port`
 - SOCKS5 代理: `socks5://host:port`
 - 带认证的代理: `http://user:pass@host:port`
+
+**常见代理格式转换**：
+- 你买到的代理如果是 `IP:端口:账号:密码`（例如 `1.2.3.4:8080:user:pass`），在本项目里请转换成 URL：`http://账号:密码@IP:端口`（即 `http://user:pass@1.2.3.4:8080`）。
+- 如果账号/密码包含特殊字符（如 `@`、`:`、`/`、`#`），需要先做 URL 编码（percent-encoding），否则会解析失败。
+
+**关于“下载视频是否走代理”**：
+- 只要请求是通过本项目内部的 `request()` 发到即梦/Dreamina 的接口（例如 `get_history_by_ids` 轮询、`get_local_item_list` 获取高清视频URL），都会走你在 Token 里绑定的代理。
+- 如果你使用 `response_format=url`，本项目只返回视频 URL，不会替你下载视频；后续“从 URL 下载视频”这一步发生在你的调用方/业务服务侧，是否走代理取决于你自己的下载逻辑。
+- 如果你使用 `response_format=b64_json`，本项目会在服务端下载视频并转为 Base64。此场景下建议同样绑定代理（否则服务端下载走 Railway 出口，可能遇到 404/风控/地域限制）。
 
 **完整示例**：
 | 场景 | Token 格式 |

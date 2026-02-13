@@ -56,7 +56,13 @@ export class JimengErrorHandler {
         throw new APIException(EX.API_REQUEST_PARAMS_INVALID, `[参数错误]: ${errmsg}`);
       
       case '5001':
-        throw new APIException(EX.API_IMAGE_GENERATION_FAILED, `[生成失败]: ${errmsg}`);
+        if (String(errmsg || "").includes("credit prededuct failed")) {
+          throw new APIException(
+            EX.API_IMAGE_GENERATION_FAILED,
+            `[积分预扣失败]: ${errmsg} (错误码: 5001)。通常是：1) 当前模型/时长对应的权益不足或不支持（例如 Pro 模型需要 Pro 权益或购买积分），2) benefit_type 与时长/模式不匹配（可尝试降低时长/切换模型如 seedance-2.0-fast），3) 账号/风控导致扣费失败。`
+          );
+        }
+        throw new APIException(EX.API_IMAGE_GENERATION_FAILED, `[生成失败]: ${errmsg} (错误码: 5001)`);
       
       case '5002':
         throw new APIException(EX.API_VIDEO_GENERATION_FAILED, `[视频生成失败]: ${errmsg}`);

@@ -2,7 +2,7 @@ import _ from 'lodash';
 
 import Request from '@/lib/request/Request.ts';
 import Response from '@/lib/response/Response.ts';
-import { tokenSplit } from '@/api/controllers/core.ts';
+import { tokenSplit, parseProxyFromToken } from '@/api/controllers/core.ts';
 import { generateVideo, DEFAULT_MODEL } from '@/api/controllers/videos.ts';
 import util from '@/lib/util.ts';
 import taskStore from '@/lib/task-store.ts';
@@ -195,7 +195,7 @@ export default {
                 taskQueue.enqueue(task.id, async () => {
                     try {
                         await taskStore.update(task.id, { status: "processing", progress: "生成中" });
-                        const generatedVideoUrl = await generateVideo(
+                        const generatedVideo = await generateVideo(
                             model,
                             prompt,
                             {
@@ -219,15 +219,30 @@ export default {
 
                         let resultData: any;
                         if (response_format === "b64_json") {
-                            const videoBase64 = await util.fetchFileBASE64(generatedVideoUrl);
+                            const { proxyUrl } = parseProxyFromToken(token);
+                            const videoBase64 = await util.fetchFileBASE64(generatedVideo.url, { proxyUrl: proxyUrl || undefined });
                             resultData = {
                                 created: util.unixTimestamp(),
-                                data: [{ b64_json: videoBase64, revised_prompt: prompt }]
+                                data: [{
+                                    b64_json: videoBase64,
+                                    revised_prompt: prompt,
+                                    history_id: generatedVideo.history_id,
+                                    item_id: generatedVideo.item_id,
+                                    preview_url: generatedVideo.preview_url,
+                                    hq_url: generatedVideo.hq_url,
+                                }]
                             };
                         } else {
                             resultData = {
                                 created: util.unixTimestamp(),
-                                data: [{ url: generatedVideoUrl, revised_prompt: prompt }]
+                                data: [{
+                                    url: generatedVideo.url,
+                                    revised_prompt: prompt,
+                                    history_id: generatedVideo.history_id,
+                                    item_id: generatedVideo.item_id,
+                                    preview_url: generatedVideo.preview_url,
+                                    hq_url: generatedVideo.hq_url,
+                                }]
                             };
                         }
 
@@ -255,7 +270,7 @@ export default {
             }
 
             // ====== 同步模式（原有逻辑不变） ======
-            const generatedVideoUrl = await generateVideo(
+            const generatedVideo = await generateVideo(
                 model,
                 prompt,
                 {
@@ -280,12 +295,17 @@ export default {
             // 根据response_format返回不同格式的结果
             if (response_format === "b64_json") {
                 // 获取视频内容并转换为BASE64
-                const videoBase64 = await util.fetchFileBASE64(generatedVideoUrl);
+                const { proxyUrl } = parseProxyFromToken(token);
+                const videoBase64 = await util.fetchFileBASE64(generatedVideo.url, { proxyUrl: proxyUrl || undefined });
                 return {
                     created: util.unixTimestamp(),
                     data: [{
                         b64_json: videoBase64,
-                        revised_prompt: prompt
+                        revised_prompt: prompt,
+                        history_id: generatedVideo.history_id,
+                        item_id: generatedVideo.item_id,
+                        preview_url: generatedVideo.preview_url,
+                        hq_url: generatedVideo.hq_url,
                     }]
                 };
             } else {
@@ -293,8 +313,12 @@ export default {
                 return {
                     created: util.unixTimestamp(),
                     data: [{
-                        url: generatedVideoUrl,
-                        revised_prompt: prompt
+                        url: generatedVideo.url,
+                        revised_prompt: prompt,
+                        history_id: generatedVideo.history_id,
+                        item_id: generatedVideo.item_id,
+                        preview_url: generatedVideo.preview_url,
+                        hq_url: generatedVideo.hq_url,
                     }]
                 };
             }

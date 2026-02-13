@@ -7,6 +7,8 @@ import "colors";
 import mime from "mime";
 import axios from "axios";
 import fs from "fs-extra";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 import { v1 as uuid } from "uuid";
 import { format as dateFormat } from "date-fns";
 import CRC32 from "crc-32";
@@ -296,11 +298,33 @@ const util = {
     return Buffer.from(value, "base64").toString();
   },
 
-  async fetchFileBASE64(url: string) {
+  async fetchFileBASE64(
+    url: string,
+    options?: {
+      proxyUrl?: string;
+      headers?: Record<string, string>;
+      timeoutMs?: number;
+    }
+  ) {
+    const proxyUrl = (options?.proxyUrl || "").trim();
+    const proxyAgent = proxyUrl
+      ? (proxyUrl.toLowerCase().startsWith("socks")
+        ? new SocksProxyAgent(proxyUrl)
+        : new HttpsProxyAgent(proxyUrl))
+      : undefined;
+
     const result = await axios.get(url, {
       responseType: "arraybuffer",
+      timeout: options?.timeoutMs ?? 60000,
+      ...(options?.headers ? { headers: options.headers } : {}),
+      ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent, proxy: false } : {}),
+      // 视频/图片体积可能较大，放宽 axios 默认限制
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
     });
-    return result.data.toString("base64");
+
+    const buffer = Buffer.isBuffer(result.data) ? result.data : Buffer.from(result.data);
+    return buffer.toString("base64");
   },
 
   /**

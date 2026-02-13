@@ -20,6 +20,29 @@ const MAX_OMNI_MATERIALS = 9;
 const OMNI_IMAGE_FIELD_PATTERN = /^image_file_(\d+)$/;
 const OMNI_VIDEO_FIELD_PATTERN = /^video_file(?:_(\d+))?$/;
 
+export interface GenerateVideoResult {
+  /**
+   * 返回给调用方的主 URL（可能是预览/播放链接，也可能是高清下载链接，取决于内部策略）
+   */
+  url: string;
+  /**
+   * 轮询接口 item_list 中提取到的播放/预览 URL（通常更通用，但不保证最高画质）
+   */
+  preview_url?: string;
+  /**
+   * 通过 get_local_item_list 提取到的“下载/高清”URL（可能对出口/IP/地域更敏感）
+   */
+  hq_url?: string;
+  /**
+   * 即梦历史记录ID（可用于外部系统自行轮询/追踪）
+   */
+  history_id: string;
+  /**
+   * item_id（可用于 get_local_item_list 获取下载链接）
+   */
+  item_id?: string;
+}
+
 export function getModel(model: string, regionInfo: RegionInfo) {
   // 根据站点选择不同的模型映射
   let modelMap: Record<string, string>;
@@ -47,10 +70,12 @@ function getVideoBenefitType(model: string): string {
     return "generate_video_sora2";
   }
   if (model.includes("40_pro")) {
-    return "dreamina_seedance_20_pro";
+    // 官网抓包：Seedance 2.0 (40_pro) 对应权益类型为 dreamina_video_seedance_20_pro
+    return "dreamina_video_seedance_20_pro";
   }
   if (model.includes("40")) {
-    return "dreamina_seedance_20_fast";
+    // 兼容：不同版本可能用 dreamina_seedance_20_fast / dreamina_video_seedance_20_fast
+    return "dreamina_video_seedance_20_fast";
   }
   if (model.includes("3.5_pro")) {
     return "dreamina_video_seedance_15_pro";
@@ -59,6 +84,41 @@ function getVideoBenefitType(model: string): string {
     return "dreamina_video_seedance_15";
   }
   return "basic_video_operation_vgfm_v_three";
+}
+
+function getVideoBenefitTypeCandidates(model: string, durationSeconds: number): string[] {
+  const base = getVideoBenefitType(model);
+  const candidates: string[] = [];
+  const push = (value?: string) => {
+    if (!value) return;
+    if (candidates.includes(value)) return;
+    candidates.push(value);
+  };
+
+  const isSeedance =
+    base.startsWith("dreamina_video_seedance_20_") ||
+    base.startsWith("dreamina_seedance_20_");
+
+  if (!isSeedance) return [base];
+
+  // 兼容旧命名：dreamina_seedance_20_* 与 dreamina_video_seedance_20_*
+  const alt = base.startsWith("dreamina_video_seedance_20_")
+    ? base.replace("dreamina_video_seedance_", "dreamina_seedance_")
+    : base.replace("dreamina_seedance_", "dreamina_video_seedance_");
+
+  // 优先用官网命名（dreamina_video_seedance_*），再回退旧命名
+  const preferred = base.startsWith("dreamina_video_seedance_20_") ? base : alt;
+  const legacy = base.startsWith("dreamina_video_seedance_20_") ? alt : base;
+
+  // 先尝试基础权益，失败再尝试 *_with_video（减少一次无谓请求；但仍覆盖长时长可能需要 with_video 的情况）
+  push(preferred);
+  push(legacy);
+  if (durationSeconds > 4) {
+    push(`${preferred}_with_video`);
+    push(`${legacy}_with_video`);
+  }
+
+  return candidates;
 }
 
 function getOmniMaterialType(fieldName: string): "image" | "video" | null {
@@ -220,7 +280,7 @@ export async function generateVideo(
     referer?: string;
   },
   refreshToken: string
-) {
+): Promise<GenerateVideoResult> {
   // 检测区域
   const regionInfo = parseRegionFromToken(refreshToken);
   const { isInternational } = regionInfo;
@@ -578,7 +638,8 @@ export async function generateVideo(
       sceneOptions: JSON.stringify([sceneOption]),
     });
 
-    const omniBenefitType = getVideoBenefitType(model);
+    const benefitTypeCandidates = getVideoBenefitTypeCandidates(model, actualDuration);
+    const omniBenefitType = benefitTypeCandidates[0];
 
     requestData = {
       params: {
@@ -783,6 +844,7 @@ export async function generateVideo(
 
     logger.info(`视频生成模式: ${uploadIDs.length}张图片 (首帧: ${!!first_frame_image}, 尾帧: ${!!end_frame_image}), resolution: ${resolution}`);
 
+    const benefitTypeCandidates = getVideoBenefitTypeCandidates(model, actualDuration);
     requestData = {
       params: {
         aigc_features: "app_lip_sync",
@@ -797,13 +859,13 @@ export async function generateVideo(
         extend: {
           root_model: model,
           m_video_commerce_info: {
-            benefit_type: getVideoBenefitType(model),
+            benefit_type: benefitTypeCandidates[0],
             resource_id: "generate_video",
             resource_id_type: "str",
             resource_sub_type: "aigc",
           },
           m_video_commerce_info_list: [{
-            benefit_type: getVideoBenefitType(model),
+            benefit_type: benefitTypeCandidates[0],
             resource_id: "generate_video",
             resource_id_type: "str",
             resource_sub_type: "aigc",
@@ -876,13 +938,48 @@ export async function generateVideo(
   // 发送AIGC安全合规确认（避免人脸检测4010错误）
   await confirmAigcCompliance(refreshToken, regionInfo);
 
-  // 发送请求
-  const { aigc_data } = await request(
-    "post",
-    "/mweb/v1/aigc_draft/generate",
-    refreshToken,
-    requestData
-  );
+  // 发送请求（部分账号/时长/模型组合下，权益 benefit_type 可能需要切换，否则会触发 5001 credit prededuct failed）
+  const benefitTypeCandidates = getVideoBenefitTypeCandidates(model, actualDuration);
+  let aigc_data: any = null;
+  let lastGenerateError: any = null;
+  for (let i = 0; i < benefitTypeCandidates.length; i++) {
+    const benefitType = benefitTypeCandidates[i];
+    try {
+      // 动态注入权益类型
+      if (requestData?.data?.extend?.m_video_commerce_info) {
+        requestData.data.extend.m_video_commerce_info.benefit_type = benefitType;
+      }
+      if (Array.isArray(requestData?.data?.extend?.m_video_commerce_info_list) && requestData.data.extend.m_video_commerce_info_list[0]) {
+        requestData.data.extend.m_video_commerce_info_list[0].benefit_type = benefitType;
+      }
+
+      if (benefitTypeCandidates.length > 1) {
+        logger.info(`尝试使用 benefit_type=${benefitType} 提交视频生成 (${i + 1}/${benefitTypeCandidates.length})`);
+      }
+
+      ({ aigc_data } = await request(
+        "post",
+        "/mweb/v1/aigc_draft/generate",
+        refreshToken,
+        requestData
+      ));
+      lastGenerateError = null;
+      break;
+    } catch (err: any) {
+      lastGenerateError = err;
+      const msg = String(err?.message || "");
+      const isPredeductFailed = msg.includes("credit prededuct failed") || msg.includes("prededuct");
+      const isLastAttempt = i >= benefitTypeCandidates.length - 1;
+      if (!isPredeductFailed || isLastAttempt) {
+        throw err;
+      }
+      logger.warn(`benefit_type=${benefitType} 提交失败(可能是积分预扣失败)，将尝试下一种权益类型: ${msg}`);
+    }
+  }
+  if (!aigc_data) {
+    // 理论上不会到这里；兜底
+    throw lastGenerateError || new Error("视频生成提交失败");
+  }
 
   const historyId = aigc_data.history_record_id;
   if (!historyId)
@@ -967,12 +1064,12 @@ export async function generateVideo(
     || item_list?.[0]?.local_item_id
     || item_list?.[0]?.common_attr?.id;
 
+  let hqVideoUrl: string | null = null;
   if (itemId) {
     try {
-      const hqVideoUrl = await fetchHighQualityVideoUrl(String(itemId), refreshToken);
+      hqVideoUrl = await fetchHighQualityVideoUrl(String(itemId), refreshToken);
       if (hqVideoUrl) {
         logger.info(`视频生成成功（高质量），URL: ${hqVideoUrl}，总耗时: ${pollingResult.elapsedTime}秒`);
-        return hqVideoUrl;
       }
     } catch (error) {
       logger.warn(`获取高质量视频URL失败，将使用预览URL作为回退: ${error.message}`);
@@ -985,11 +1082,19 @@ export async function generateVideo(
   let fallbackVideoUrl = item_list?.[0] ? extractVideoUrl(item_list[0]) : null;
 
   // 如果无法获取视频URL，抛出异常
-  if (!fallbackVideoUrl) {
+  if (!fallbackVideoUrl && !hqVideoUrl) {
     logger.error(`未能获取视频URL，item_list: ${JSON.stringify(item_list)}`);
     throw new APIException(EX.API_IMAGE_GENERATION_FAILED, "未能获取视频URL，请稍后查看");
   }
 
-  logger.info(`视频生成成功，URL: ${fallbackVideoUrl}，总耗时: ${pollingResult.elapsedTime}秒`);
-  return fallbackVideoUrl;
+  const urlToReturn = hqVideoUrl || fallbackVideoUrl!;
+  logger.info(`视频生成成功，URL: ${urlToReturn}，总耗时: ${pollingResult.elapsedTime}秒`);
+
+  return {
+    url: urlToReturn,
+    ...(fallbackVideoUrl ? { preview_url: fallbackVideoUrl } : {}),
+    ...(hqVideoUrl ? { hq_url: hqVideoUrl } : {}),
+    history_id: String(historyId),
+    ...(itemId ? { item_id: String(itemId) } : {}),
+  };
 }
