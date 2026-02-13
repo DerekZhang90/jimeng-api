@@ -74,8 +74,9 @@ function getVideoBenefitType(model: string): string {
     return "dreamina_video_seedance_20_pro";
   }
   if (model.includes("40")) {
-    // 兼容：不同版本可能用 dreamina_seedance_20_fast / dreamina_video_seedance_20_fast
-    return "dreamina_video_seedance_20_fast";
+    // Seedance 2.0 Fast：不同版本/账号可能使用 dreamina_seedance_20_fast 或 dreamina_video_seedance_20_fast
+    // 这里先返回 legacy 命名，若失败会在候选列表中自动回退到 video_ 命名。
+    return "dreamina_seedance_20_fast";
   }
   if (model.includes("3.5_pro")) {
     return "dreamina_video_seedance_15_pro";
@@ -106,16 +107,18 @@ function getVideoBenefitTypeCandidates(model: string, durationSeconds: number): 
     ? base.replace("dreamina_video_seedance_", "dreamina_seedance_")
     : base.replace("dreamina_seedance_", "dreamina_video_seedance_");
 
-  // 优先用官网命名（dreamina_video_seedance_*），再回退旧命名
-  const preferred = base.startsWith("dreamina_video_seedance_20_") ? base : alt;
-  const legacy = base.startsWith("dreamina_video_seedance_20_") ? alt : base;
-
-  // 先尝试基础权益，失败再尝试 *_with_video（减少一次无谓请求；但仍覆盖长时长可能需要 with_video 的情况）
-  push(preferred);
-  push(legacy);
+  // 候选顺序：
+  // 1) base（按模型/已知官网抓包选择）
+  // 2) 长时长优先尝试 base_with_video（有些账号/时长组合需要）
+  // 3) alt（另一种命名方式）
+  // 4) alt_with_video
+  push(base);
   if (durationSeconds > 4) {
-    push(`${preferred}_with_video`);
-    push(`${legacy}_with_video`);
+    push(`${base}_with_video`);
+  }
+  push(alt);
+  if (durationSeconds > 4) {
+    push(`${alt}_with_video`);
   }
 
   return candidates;
@@ -969,11 +972,14 @@ export async function generateVideo(
       lastGenerateError = err;
       const msg = String(err?.message || "");
       const isPredeductFailed = msg.includes("credit prededuct failed") || msg.includes("prededuct");
+      const isInvalidParameter = msg.includes("invalid parameter") || msg.includes("错误码: 1000");
+      const isRetryableBenefitTypeIssue = isPredeductFailed || isInvalidParameter;
       const isLastAttempt = i >= benefitTypeCandidates.length - 1;
-      if (!isPredeductFailed || isLastAttempt) {
+      if (!isRetryableBenefitTypeIssue || isLastAttempt) {
         throw err;
       }
-      logger.warn(`benefit_type=${benefitType} 提交失败(可能是积分预扣失败)，将尝试下一种权益类型: ${msg}`);
+      const reason = isPredeductFailed ? "积分预扣失败" : "参数错误(可能是权益类型不匹配)";
+      logger.warn(`benefit_type=${benefitType} 提交失败(${reason})，将尝试下一种权益类型: ${msg}`);
     }
   }
   if (!aigc_data) {
