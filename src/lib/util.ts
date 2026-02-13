@@ -332,7 +332,7 @@ const util = {
    * @param buffer ArrayBuffer 数据
    * @returns CRC32 十六进制字符串
    */
-  calculateCRC32(buffer: ArrayBuffer): string {
+  calculateCRC32(buffer: ArrayBuffer | Buffer): string {
     const crcTable = [];
     for (let i = 0; i < 256; i++) {
       let crc = i;
@@ -343,7 +343,9 @@ const util = {
     }
 
     let crc = 0 ^ (-1);
-    const bytes = new Uint8Array(buffer);
+    const bytes = Buffer.isBuffer(buffer)
+      ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+      : new Uint8Array(buffer);
     for (let i = 0; i < bytes.length; i++) {
       crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[i]) & 0xFF];
     }

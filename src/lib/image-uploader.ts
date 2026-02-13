@@ -1,6 +1,8 @@
 import crypto from "crypto";
 import axios from "axios";
-import { RegionInfo, request } from "@/api/controllers/core.ts";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
+import { RegionInfo, parseProxyFromToken, request } from "@/api/controllers/core.ts";
 import { RegionUtils } from "@/lib/region-utils.ts";
 import { createSignature } from "@/lib/aws-signature.ts";
 import logger from "@/lib/logger.ts";
@@ -10,6 +12,66 @@ import util from "@/lib/util.ts";
  * 统一的图片上传模块
  * 整合了images.ts和videos.ts中重复的上传逻辑
  */
+
+const DEFAULT_NETWORK_TIMEOUT_MS = 45000;
+const DEFAULT_RETRY_DELAY_MS = 5000;
+const DEFAULT_MAX_RETRIES = 3;
+
+const RETRYABLE_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+]);
+
+function isRetryableNetworkError(error: any): boolean {
+  const message = String(error?.message || "");
+  return (
+    RETRYABLE_ERROR_CODES.has(String(error?.code || "")) ||
+    message.includes("timeout") ||
+    message.includes("network") ||
+    message.includes("ECONNRESET") ||
+    message.includes("socket hang up") ||
+    message.includes("wrong version number") ||
+    message.includes("Client network socket disconnected") ||
+    message.includes("Proxy connection")
+  );
+}
+
+function maskProxyUrl(proxyUrl: string): string {
+  return proxyUrl.replace(/\/\/([^@/]+)@/i, "//***@");
+}
+
+async function sleep(ms: number) {
+  await new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function axiosWithRetry<T>(
+  operation: () => Promise<T>,
+  context: string,
+  options?: { maxRetries?: number; retryDelayMs?: number }
+): Promise<T> {
+  const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const retryDelayMs = options?.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+
+  let retries = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      if (!isRetryableNetworkError(error) || retries >= maxRetries) throw error;
+      retries++;
+      logger.warn(`${context} 网络错误: ${error.message}，${retryDelayMs / 1000}s 后重试 (${retries}/${maxRetries})`);
+      await sleep(retryDelayMs);
+    }
+  }
+}
 
 /**
  * 上传图片Buffer到ImageX
@@ -22,9 +84,19 @@ export async function uploadImageBuffer(
   imageBuffer: ArrayBuffer | Buffer,
   refreshToken: string,
   regionInfo: RegionInfo
-): Promise<string> {
+  ): Promise<string> {
   try {
     logger.info(`开始上传图片Buffer... (isInternational: ${regionInfo.isInternational})`);
+
+    const { proxyUrl } = parseProxyFromToken(refreshToken);
+    const proxyAgent = proxyUrl
+      ? (proxyUrl.toLowerCase().startsWith("socks")
+        ? new SocksProxyAgent(proxyUrl)
+        : new HttpsProxyAgent(proxyUrl))
+      : undefined;
+    if (proxyUrl) {
+      logger.info(`ImageX 上传使用代理: ${maskProxyUrl(proxyUrl)}`);
+    }
 
     // 第一步：获取上传令牌
     const tokenResult = await request("post", "/mweb/v1/get_upload_token", refreshToken, {
@@ -70,27 +142,32 @@ export async function uploadImageBuffer(
 
     let applyResponse;
     try {
-      applyResponse = await axios({
-        method: 'GET',
-        url: applyUrl,
-        headers: {
-          'accept': '*/*',
-          'accept-language': 'zh-CN,zh;q=0.9',
-          'authorization': authorization,
-          'origin': origin,
-          'referer': `${origin}/ai-tool/generate`,
-          'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
-          'sec-ch-ua-mobile': '?0',
-          'sec-ch-ua-platform': '"Windows"',
-          'sec-fetch-dest': 'empty',
-          'sec-fetch-mode': 'cors',
-          'sec-fetch-site': 'cross-site',
-          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-          'x-amz-date': timestamp,
-          'x-amz-security-token': session_token,
-        },
-        validateStatus: () => true,
-      });
+      applyResponse = await axiosWithRetry(
+        () => axios({
+          method: 'GET',
+          url: applyUrl,
+          headers: {
+            'accept': '*/*',
+            'accept-language': 'zh-CN,zh;q=0.9',
+            'authorization': authorization,
+            'origin': origin,
+            'referer': `${origin}/ai-tool/generate`,
+            'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'cross-site',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+            'x-amz-date': timestamp,
+            'x-amz-security-token': session_token,
+          },
+          timeout: DEFAULT_NETWORK_TIMEOUT_MS,
+          ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent, proxy: false } : {}),
+          validateStatus: () => true,
+        }),
+        `ApplyImageUpload (${applyUrlHost})`
+      );
     } catch (fetchError: any) {
       logger.error(`Fetch请求失败，目标URL: ${applyUrl}`);
       logger.error(`错误详情: ${fetchError.message}`);
@@ -126,27 +203,35 @@ export async function uploadImageBuffer(
     // 第三步：上传图片文件
     let uploadResponse;
     try {
-      uploadResponse = await axios({
-        method: 'POST',
-        url: uploadUrl,
-        headers: {
-          'Accept': '*/*',
-          'Accept-Language': 'zh-CN,zh;q=0.9',
-          'Authorization': auth,
-          'Connection': 'keep-alive',
-          'Content-CRC32': crc32,
-          'Content-Disposition': 'attachment; filename="undefined"',
-          'Content-Type': 'application/octet-stream',
-          'Origin': origin,
-          'Referer': RegionUtils.getRefererPath(regionInfo),
-          'Sec-Fetch-Dest': 'empty',
-          'Sec-Fetch-Mode': 'cors',
-          'Sec-Fetch-Site': 'cross-site',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-        },
-        data: imageBuffer,
-        validateStatus: () => true,
-      });
+      uploadResponse = await axiosWithRetry(
+        () => axios({
+          method: 'POST',
+          url: uploadUrl,
+          headers: {
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Authorization': auth,
+            'Connection': 'keep-alive',
+            'Content-CRC32': crc32,
+            'Content-Disposition': 'attachment; filename="undefined"',
+            'Content-Type': 'application/octet-stream',
+            'Origin': origin,
+            'Referer': RegionUtils.getRefererPath(regionInfo),
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'cross-site',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+          },
+          data: imageBuffer,
+          timeout: DEFAULT_NETWORK_TIMEOUT_MS,
+          ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent, proxy: false } : {}),
+          // 图片体积可能较大，放宽 axios 默认限制
+          maxBodyLength: Infinity,
+          maxContentLength: Infinity,
+          validateStatus: () => true,
+        }),
+        `UploadImage (${uploadHost})`
+      );
     } catch (fetchError: any) {
       logger.error(`图片文件上传fetch请求失败，目标URL: ${uploadUrl}`);
       logger.error(`错误详情: ${fetchError.message}`);
@@ -179,30 +264,35 @@ export async function uploadImageBuffer(
 
     let commitResponse;
     try {
-      commitResponse = await axios({
-        method: 'POST',
-        url: commitUrl,
-        headers: {
-          'accept': '*/*',
-          'accept-language': 'zh-CN,zh;q=0.9',
-          'authorization': commitAuthorization,
-          'content-type': 'application/json',
-          'origin': origin,
-          'referer': RegionUtils.getRefererPath(regionInfo),
-          'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
-          'sec-ch-ua-mobile': '?0',
-          'sec-ch-ua-platform': '"Windows"',
-          'sec-fetch-dest': 'empty',
-          'sec-fetch-mode': 'cors',
-          'sec-fetch-site': 'cross-site',
-          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-          'x-amz-date': commitTimestamp,
-          'x-amz-security-token': session_token,
-          'x-amz-content-sha256': payloadHash,
-        },
-        data: commitPayload,
-        validateStatus: () => true,
-      });
+      commitResponse = await axiosWithRetry(
+        () => axios({
+          method: 'POST',
+          url: commitUrl,
+          headers: {
+            'accept': '*/*',
+            'accept-language': 'zh-CN,zh;q=0.9',
+            'authorization': commitAuthorization,
+            'content-type': 'application/json',
+            'origin': origin,
+            'referer': RegionUtils.getRefererPath(regionInfo),
+            'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'cross-site',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+            'x-amz-date': commitTimestamp,
+            'x-amz-security-token': session_token,
+            'x-amz-content-sha256': payloadHash,
+          },
+          data: commitPayload,
+          timeout: DEFAULT_NETWORK_TIMEOUT_MS,
+          ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent, proxy: false } : {}),
+          validateStatus: () => true,
+        }),
+        `CommitImageUpload (${applyUrlHost})`
+      );
     } catch (fetchError: any) {
       logger.error(`提交上传fetch请求失败，目标URL: ${commitUrl}`);
       logger.error(`错误详情: ${fetchError.message}`);
